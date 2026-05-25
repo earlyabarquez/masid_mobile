@@ -29,7 +29,12 @@ class _HomeShellState extends State<HomeShell> {
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const CameraScreen()),
-      );
+      ).then((submitted) {
+        // If report was submitted, switch to Reports tab
+        if (submitted == true) {
+          setState(() => _currentIndex = 1);
+        }
+      });
       return;
     }
     setState(() => _currentIndex = index);
