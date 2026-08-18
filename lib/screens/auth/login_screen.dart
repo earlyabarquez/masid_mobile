@@ -4,6 +4,7 @@ import '../../config/app_constants.dart';
 import 'register_screen.dart';
 import '../home/home_shell.dart';
 import '../../utils/token_storage.dart';
+import '../../services/auth_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -16,6 +17,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
+  final _authService = AuthService();
   bool _obscurePass = true;
   bool _loading = false;
 
@@ -31,19 +33,27 @@ class _LoginScreenState extends State<LoginScreen> {
 
     setState(() => _loading = true);
 
-    // TODO: Replace with actual Spring Boot API call
-    await Future.delayed(const Duration(seconds: 1));
-
-    // Simulate saving token
-    await TokenStorage.saveToken('temp_jwt_token');
+    final result = await _authService.login(
+      _emailCtrl.text.trim(),
+      _passCtrl.text,
+    );
 
     if (!mounted) return;
     setState(() => _loading = false);
 
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const HomeShell()),
-    );
+    if (result.success) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeShell()),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.error ?? 'Login failed'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
+    }
   }
 
   @override
