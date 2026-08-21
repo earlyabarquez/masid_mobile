@@ -5,29 +5,30 @@ import 'package:image_picker/image_picker.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import '../../services/cloudinary_service.dart';
+import '../../services/hazard_service.dart';
+import '../../services/barangay_service.dart';
+import '../../services/report_service.dart';
 
-// 19 Bohol-specific hazard types
-const List<Map<String, dynamic>> hazardTypes = [
-  {'name': 'Flood', 'icon': Icons.water_rounded},
-  {'name': 'Landslide', 'icon': Icons.landscape_rounded},
-  {'name': 'Earthquake', 'icon': Icons.vibration_rounded},
-  {'name': 'Fire', 'icon': Icons.local_fire_department_rounded},
-  {'name': 'Typhoon', 'icon': Icons.thunderstorm_rounded},
-  {'name': 'Storm Surge', 'icon': Icons.waves_rounded},
-  {'name': 'Volcanic Activity', 'icon': Icons.volcano_rounded},
-  {'name': 'Drought', 'icon': Icons.wb_sunny_rounded},
-  {'name': 'Sinkhole', 'icon': Icons.circle_outlined},
-  {'name': 'Road Accident', 'icon': Icons.car_crash_rounded},
-  {'name': 'Structural Collapse', 'icon': Icons.domain_disabled_rounded},
-  {'name': 'Coastal Erosion', 'icon': Icons.water_damage_rounded},
-  {'name': 'Flash Flood', 'icon': Icons.flood_rounded},
-  {'name': 'Soil Erosion', 'icon': Icons.terrain_rounded},
-  {'name': 'Power Outage', 'icon': Icons.power_off_rounded},
-  {'name': 'Water Contamination', 'icon': Icons.water_drop_rounded},
-  {'name': 'Fallen Tree', 'icon': Icons.park_rounded},
-  {'name': 'Animal Hazard', 'icon': Icons.pets_rounded},
-  {'name': 'Other', 'icon': Icons.warning_rounded},
-];
+// Icon mapping for hazard names (fetched hazards use these icons by name)
+const Map<String, IconData> hazardIcons = {
+  'Flood': Icons.water_rounded,
+  'Landslide': Icons.landscape_rounded,
+  'Earthquake': Icons.vibration_rounded,
+  'Fire': Icons.local_fire_department_rounded,
+  'Typhoon': Icons.thunderstorm_rounded,
+  'Storm Surge': Icons.waves_rounded,
+  'Drought': Icons.wb_sunny_rounded,
+  'Sinkhole': Icons.circle_outlined,
+  'Road Accident': Icons.car_crash_rounded,
+  'Structural Collapse': Icons.domain_disabled_rounded,
+  'Flash Flood': Icons.flood_rounded,
+  'Soil Erosion': Icons.terrain_rounded,
+  'Power Outage': Icons.power_off_rounded,
+  'Water Contamination': Icons.water_drop_rounded,
+  'Fallen Tree': Icons.park_rounded,
+  'Animal Hazard': Icons.pets_rounded,
+  'Other': Icons.warning_rounded,
+};
 
 class ReportFormSheet extends StatefulWidget {
   final XFile photo;
@@ -49,9 +50,19 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   final _formKey = GlobalKey<FormState>();
   final _descCtrl = TextEditingController();
 
-  String? _selectedType;
+  final _hazardService = HazardService();
+  final _barangayService = BarangayService();
+  final _reportService = ReportService();
+
+  List<HazardType> _hazards = [];
+  List<Barangay> _barangays = [];
+
+  int? _selectedHazardID;
+  int? _selectedBrgyID;
   int _severity = 3;
-  bool _loading = false;
+
+  bool _loadingData = true; // fetching hazards + barangays
+  bool _loading = false; // submitting
   String? _errorMessage;
 
   // Mock location (replace with real GPS later)
@@ -61,19 +72,47 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   bool get _isCritical => _severity == 5;
 
   @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  @override
   void dispose() {
     _descCtrl.dispose();
     super.dispose();
   }
 
+  // Fetch hazard types + barangays from the backend
+  Future<void> _loadData() async {
+    try {
+      final hazards = await _hazardService.getHazardTypes();
+      final barangays = await _barangayService.getBarangays();
+      if (!mounted) return;
+      setState(() {
+        _hazards = hazards;
+        _barangays = barangays;
+        _loadingData = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingData = false;
+        _errorMessage = 'Failed to load form data. Check your connection.';
+      });
+    }
+  }
+
   Future<void> _handleSubmit() async {
-    // Validate type selection
-    if (_selectedType == null) {
+    // Validation
+    if (_selectedHazardID == null) {
       setState(() => _errorMessage = 'Please select a hazard type');
       return;
     }
-
-    // Validate description (required for severity 1-4)
+    if (_selectedBrgyID == null) {
+      setState(() => _errorMessage = 'Please select a barangay');
+      return;
+    }
     if (!_isCritical && _descCtrl.text.trim().isEmpty) {
       setState(
         () =>
@@ -88,31 +127,23 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     });
 
     try {
-      // Upload photo to Cloudinary
+      // 1. Upload photo to Cloudinary
       final imageUrl = await CloudinaryService.uploadImage(widget.photo);
 
-      // Build report payload
-      final payload = {
-        'hazardType': _selectedType,
-        'severity': _severity,
-        'description': _descCtrl.text.trim(),
-        'latitude': _lat,
-        'longitude': _lng,
-        'imageUrl': imageUrl,
-        'status': _isCritical ? 'Critical' : 'Pending',
-        // TODO: Add reporter info from auth
-      };
-
-      // TODO: Send to Spring Boot API
-      // final response = await ApiService.post('/hazards', payload);
-      await Future.delayed(const Duration(seconds: 1)); // Mock delay
-
-      debugPrint('Report payload: $payload');
+      // 2. Submit the report to the backend
+      await _reportService.submitReport(
+        hazardID: _selectedHazardID!,
+        brgyID: _selectedBrgyID!,
+        severity: _severity,
+        description: _descCtrl.text.trim(),
+        latitude: _lat,
+        longitude: _lng,
+        imageURL: imageUrl,
+      );
 
       if (!mounted) return;
       setState(() => _loading = false);
 
-      // Show success snackbar
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Row(
@@ -126,7 +157,7 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
               Expanded(
                 child: Text(
                   _isCritical
-                      ? 'Critical report auto-posted to map'
+                      ? 'Critical report submitted'
                       : 'Report submitted for verification',
                   style: const TextStyle(fontFamily: 'Sora'),
                 ),
@@ -143,7 +174,7 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _errorMessage = 'Failed to submit. Please try again.';
+        _errorMessage = 'Failed to submit: ${e.toString()}';
       });
     }
   }
@@ -160,143 +191,150 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       ),
       child: Column(
         children: [
-          // ── Header ──
           _buildHeader(),
 
-          // ── Form ──
-          Expanded(
-            child: SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(20, 0, 20, bottomPadding + 20),
-              child: Form(
-                key: _formKey,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // ── Photo preview ──
-                    _buildPhotoPreview(),
-                    const SizedBox(height: 20),
+          // While fetching hazard types + barangays, show a loader
+          if (_loadingData)
+            const Expanded(child: Center(child: CircularProgressIndicator()))
+          else
+            Expanded(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(20, 0, 20, bottomPadding + 20),
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildPhotoPreview(),
+                      const SizedBox(height: 20),
 
-                    // ── Hazard type ──
-                    _buildSectionLabel('Hazard Type', required: true),
-                    const SizedBox(height: 8),
-                    _buildHazardTypeGrid(),
-                    const SizedBox(height: 20),
+                      // ── Hazard type ──
+                      _buildSectionLabel('Hazard Type', required: true),
+                      const SizedBox(height: 8),
+                      _buildHazardTypeGrid(),
+                      const SizedBox(height: 20),
 
-                    // ── Severity ──
-                    _buildSectionLabel('Severity Level', required: true),
-                    const SizedBox(height: 8),
-                    _buildSeveritySelector(),
-                    const SizedBox(height: 20),
+                      // ── Barangay ──
+                      _buildSectionLabel('Barangay', required: true),
+                      const SizedBox(height: 8),
+                      _buildBarangayDropdown(),
+                      const SizedBox(height: 20),
 
-                    // ── Description ──
-                    _buildSectionLabel(
-                      'Description',
-                      required: !_isCritical,
-                      optional: _isCritical,
-                    ),
-                    const SizedBox(height: 8),
-                    TextFormField(
-                      controller: _descCtrl,
-                      maxLines: 3,
-                      decoration: InputDecoration(
-                        hintText: _isCritical
-                            ? 'Add details if possible (optional)'
-                            : 'Describe the hazard situation...',
+                      // ── Severity ──
+                      _buildSectionLabel('Severity Level', required: true),
+                      const SizedBox(height: 8),
+                      _buildSeveritySelector(),
+                      const SizedBox(height: 20),
+
+                      // ── Description ──
+                      _buildSectionLabel(
+                        'Description',
+                        required: !_isCritical,
+                        optional: _isCritical,
                       ),
-                    ),
-                    const SizedBox(height: 20),
+                      const SizedBox(height: 8),
+                      TextFormField(
+                        controller: _descCtrl,
+                        maxLines: 3,
+                        decoration: InputDecoration(
+                          hintText: _isCritical
+                              ? 'Add details if possible (optional)'
+                              : 'Describe the hazard situation...',
+                        ),
+                      ),
+                      const SizedBox(height: 20),
 
-                    // ── Location ──
-                    _buildSectionLabel('Location', required: false),
-                    const SizedBox(height: 8),
-                    _buildLocationCard(),
-                    const SizedBox(height: 24),
+                      // ── Location ──
+                      _buildSectionLabel('Location', required: false),
+                      const SizedBox(height: 8),
+                      _buildLocationCard(),
+                      const SizedBox(height: 24),
 
-                    // ── Error message ──
-                    if (_errorMessage != null) ...[
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: AppColors.rejectedBg,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: AppColors.error.withValues(alpha: 0.3),
+                      // ── Error message ──
+                      if (_errorMessage != null) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.rejectedBg,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: AppColors.error.withValues(alpha: 0.3),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.error_outline_rounded,
+                                size: 18,
+                                color: AppColors.error,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _errorMessage!,
+                                  style: const TextStyle(
+                                    fontFamily: 'Sora',
+                                    fontSize: 12,
+                                    color: AppColors.rejectedText,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.error_outline_rounded,
-                              size: 18,
-                              color: AppColors.error,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _errorMessage!,
-                                style: const TextStyle(
-                                  fontFamily: 'Sora',
-                                  fontSize: 12,
-                                  color: AppColors.rejectedText,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                    ],
+                        const SizedBox(height: 16),
+                      ],
 
-                    // ── Submit button ──
-                    SizedBox(
-                      width: double.infinity,
-                      height: 52,
-                      child: ElevatedButton(
-                        onPressed: _loading ? null : _handleSubmit,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _isCritical
-                              ? AppColors.error
-                              : AppColors.primary,
-                        ),
-                        child: _loading
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
+                      // ── Submit button ──
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          onPressed: _loading ? null : _handleSubmit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _isCritical
+                                ? AppColors.error
+                                : AppColors.primary,
+                          ),
+                          child: _loading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      _isCritical
+                                          ? Icons.warning_rounded
+                                          : Icons.send_rounded,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _isCritical
+                                          ? 'Submit Critical Report'
+                                          : 'Submit Report',
+                                    ),
+                                  ],
                                 ),
-                              )
-                            : Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    _isCritical
-                                        ? Icons.warning_rounded
-                                        : Icons.send_rounded,
-                                    size: 18,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    _isCritical
-                                        ? 'Submit Critical Report'
-                                        : 'Submit Report',
-                                  ),
-                                ],
-                              ),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  // ── Header with drag handle + close ──
+  // ── Header ──
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 12, 12, 12),
@@ -365,13 +403,12 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                 ? Image.network(widget.photo.path, fit: BoxFit.cover)
                 : Image.file(File(widget.photo.path), fit: BoxFit.cover),
           ),
-          // Retake button
           Positioned(
             bottom: 8,
             right: 8,
             child: GestureDetector(
               onTap: () {
-                widget.onCancel(); // Go back to retake
+                widget.onCancel();
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(
@@ -406,16 +443,17 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Hazard type grid ──
+  // ── Hazard type grid (fetched from backend, stores hazardID) ──
   Widget _buildHazardTypeGrid() {
     return Wrap(
       spacing: 8,
       runSpacing: 8,
-      children: hazardTypes.map((type) {
-        final isSelected = _selectedType == type['name'];
+      children: _hazards.map((hazard) {
+        final isSelected = _selectedHazardID == hazard.hazardID;
+        final icon = hazardIcons[hazard.hazardName] ?? Icons.warning_rounded;
         return GestureDetector(
           onTap: () => setState(() {
-            _selectedType = type['name'];
+            _selectedHazardID = hazard.hazardID;
             _errorMessage = null;
           }),
           child: Container(
@@ -432,13 +470,13 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  type['icon'] as IconData,
+                  icon,
                   size: 16,
                   color: isSelected ? AppColors.primary : AppColors.muted,
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  type['name'] as String,
+                  hazard.hazardName,
                   style: TextStyle(
                     fontFamily: 'Sora',
                     fontSize: 12,
@@ -454,7 +492,51 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Severity selector (tappable circles) ──
+  // ── Barangay dropdown (fetched from backend, stores brgyID) ──
+  Widget _buildBarangayDropdown() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<int>(
+          value: _selectedBrgyID,
+          isExpanded: true,
+          hint: const Text(
+            'Select barangay',
+            style: TextStyle(
+              fontFamily: 'Sora',
+              fontSize: 13,
+              color: AppColors.label,
+            ),
+          ),
+          icon: const Icon(Icons.keyboard_arrow_down_rounded),
+          items: _barangays.map((b) {
+            return DropdownMenuItem<int>(
+              value: b.brgyID,
+              child: Text(
+                b.brgyName,
+                style: const TextStyle(
+                  fontFamily: 'Sora',
+                  fontSize: 13,
+                  color: AppColors.body,
+                ),
+              ),
+            );
+          }).toList(),
+          onChanged: (val) => setState(() {
+            _selectedBrgyID = val;
+            _errorMessage = null;
+          }),
+        ),
+      ),
+    );
+  }
+
+  // ── Severity selector ──
   Widget _buildSeveritySelector() {
     final labels = ['Minimal', 'Low', 'Moderate', 'High', 'Critical'];
     final colors = [
@@ -521,8 +603,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
             );
           }),
         ),
-
-        // Critical warning banner
         if (_isCritical) ...[
           const SizedBox(height: 14),
           Container(
