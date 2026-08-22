@@ -8,11 +8,11 @@ class AppConstants {
   // Use your machine's IP for physical device
 
   // ── Cloudinary ──
-  static const String cloudinaryCloudName = 'YOUR_CLOUD_NAME';
-  static const String cloudinaryUploadPreset = 'YOUR_UPLOAD_PRESET';
+  static const String cloudinaryCloudName = 'dvi2bzbiz';
+  static const String cloudinaryUploadPreset = 'masid_webapp';
 
   // ── App Info ──
-  static const String appName = 'M.A.S.I.D';
+  static const String appName = 'MASID';
   static const String appFullName =
       'Municipal Assessment of Spatial Incident Density';
   static const String appTagline = 'See it. Report it. Prevent it.';

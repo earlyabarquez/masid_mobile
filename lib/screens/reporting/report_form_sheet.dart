@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../config/app_colors.dart';
-import '../../config/app_constants.dart';
 import '../../services/cloudinary_service.dart';
 import '../../services/hazard_service.dart';
 import '../../services/barangay_service.dart';
@@ -65,9 +65,11 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   bool _loading = false; // submitting
   String? _errorMessage;
 
-  // Mock location (replace with real GPS later)
-  final double _lat = AppConstants.defaultLat;
-  final double _lng = AppConstants.defaultLng;
+  // Real GPS location
+  double? _lat;
+  double? _lng;
+  bool _gettingLocation = true;
+  String? _locationError;
 
   bool get _isCritical => _severity == 5;
 
@@ -75,6 +77,7 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   void initState() {
     super.initState();
     _loadData();
+    _getLocation();
   }
 
   @override
@@ -103,14 +106,67 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     }
   }
 
+  // Capture the device's real GPS coordinates
+  Future<void> _getLocation() async {
+    setState(() {
+      _gettingLocation = true;
+      _locationError = null;
+    });
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        setState(() {
+          _gettingLocation = false;
+          _locationError = 'Location services are turned off';
+        });
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        setState(() {
+          _gettingLocation = false;
+          _locationError = 'Location permission denied';
+        });
+        return;
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      if (!mounted) return;
+      setState(() {
+        _lat = pos.latitude;
+        _lng = pos.longitude;
+        _gettingLocation = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _gettingLocation = false;
+        _locationError = 'Could not get location';
+      });
+    }
+  }
+
   Future<void> _handleSubmit() async {
-    // Validation
     if (_selectedHazardID == null) {
       setState(() => _errorMessage = 'Please select a hazard type');
       return;
     }
     if (_selectedBrgyID == null) {
       setState(() => _errorMessage = 'Please select a barangay');
+      return;
+    }
+    if (_lat == null || _lng == null) {
+      setState(
+        () => _errorMessage =
+            'Waiting for GPS location. Tap the location card to retry.',
+      );
       return;
     }
     if (!_isCritical && _descCtrl.text.trim().isEmpty) {
@@ -130,14 +186,14 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       // 1. Upload photo to Cloudinary
       final imageUrl = await CloudinaryService.uploadImage(widget.photo);
 
-      // 2. Submit the report to the backend
+      // 2. Submit the report to the backend (real GPS coords)
       await _reportService.submitReport(
         hazardID: _selectedHazardID!,
         brgyID: _selectedBrgyID!,
         severity: _severity,
         description: _descCtrl.text.trim(),
-        latitude: _lat,
-        longitude: _lng,
+        latitude: _lat!,
+        longitude: _lng!,
         imageURL: imageUrl,
       );
 
@@ -192,8 +248,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       child: Column(
         children: [
           _buildHeader(),
-
-          // While fetching hazard types + barangays, show a loader
           if (_loadingData)
             const Expanded(child: Center(child: CircularProgressIndicator()))
           else
@@ -207,26 +261,18 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                     children: [
                       _buildPhotoPreview(),
                       const SizedBox(height: 20),
-
-                      // ── Hazard type ──
                       _buildSectionLabel('Hazard Type', required: true),
                       const SizedBox(height: 8),
                       _buildHazardTypeGrid(),
                       const SizedBox(height: 20),
-
-                      // ── Barangay ──
                       _buildSectionLabel('Barangay', required: true),
                       const SizedBox(height: 8),
                       _buildBarangayDropdown(),
                       const SizedBox(height: 20),
-
-                      // ── Severity ──
                       _buildSectionLabel('Severity Level', required: true),
                       const SizedBox(height: 8),
                       _buildSeveritySelector(),
                       const SizedBox(height: 20),
-
-                      // ── Description ──
                       _buildSectionLabel(
                         'Description',
                         required: !_isCritical,
@@ -243,14 +289,10 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                         ),
                       ),
                       const SizedBox(height: 20),
-
-                      // ── Location ──
                       _buildSectionLabel('Location', required: false),
                       const SizedBox(height: 8),
                       _buildLocationCard(),
                       const SizedBox(height: 24),
-
-                      // ── Error message ──
                       if (_errorMessage != null) ...[
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -284,8 +326,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                         ),
                         const SizedBox(height: 16),
                       ],
-
-                      // ── Submit button ──
                       SizedBox(
                         width: double.infinity,
                         height: 52,
@@ -334,7 +374,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Header ──
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 12, 12, 12),
@@ -390,7 +429,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Photo preview ──
   Widget _buildPhotoPreview() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
@@ -443,7 +481,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Hazard type grid (fetched from backend, stores hazardID) ──
   Widget _buildHazardTypeGrid() {
     return Wrap(
       spacing: 8,
@@ -492,7 +529,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Barangay dropdown (fetched from backend, stores brgyID) ──
   Widget _buildBarangayDropdown() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -536,7 +572,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Severity selector ──
   Widget _buildSeveritySelector() {
     final labels = ['Minimal', 'Low', 'Moderate', 'High', 'Critical'];
     final colors = [
@@ -640,89 +675,111 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     );
   }
 
-  // ── Location card ──
   Widget _buildLocationCard() {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: AppColors.background,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppColors.primaryLight,
-              borderRadius: BorderRadius.circular(10),
+    final hasCoords = _lat != null && _lng != null;
+    return GestureDetector(
+      onTap: (_gettingLocation) ? null : _getLocation,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.primaryLight,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(
+                Icons.location_on_rounded,
+                color: AppColors.primary,
+                size: 18,
+              ),
             ),
-            child: const Icon(
-              Icons.location_on_rounded,
-              color: AppColors.primary,
-              size: 18,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'GPS Coordinates',
-                  style: TextStyle(
-                    fontFamily: 'Sora',
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.heading,
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'GPS Coordinates',
+                    style: TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.heading,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${_lat.toStringAsFixed(4)}, ${_lng.toStringAsFixed(4)}',
-                  style: const TextStyle(
-                    fontFamily: 'Sora',
-                    fontSize: 12,
-                    color: AppColors.muted,
+                  const SizedBox(height: 2),
+                  Text(
+                    _gettingLocation
+                        ? 'Getting location…'
+                        : hasCoords
+                        ? '${_lat!.toStringAsFixed(5)}, ${_lng!.toStringAsFixed(5)}'
+                        : (_locationError ?? 'No location — tap to retry'),
+                    style: TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 12,
+                      color: hasCoords ? AppColors.muted : AppColors.error,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: AppColors.verifiedBg,
-              borderRadius: BorderRadius.circular(100),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.check_circle_rounded,
-                  size: 12,
-                  color: AppColors.success,
+            if (_gettingLocation)
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
                 ),
-                SizedBox(width: 4),
-                Text(
-                  'Auto',
-                  style: TextStyle(
-                    fontFamily: 'Sora',
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.verifiedText,
-                  ),
+                decoration: BoxDecoration(
+                  color: hasCoords
+                      ? AppColors.verifiedBg
+                      : AppColors.error.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(100),
                 ),
-              ],
-            ),
-          ),
-        ],
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      hasCoords
+                          ? Icons.check_circle_rounded
+                          : Icons.refresh_rounded,
+                      size: 12,
+                      color: hasCoords ? AppColors.success : AppColors.error,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      hasCoords ? 'Live' : 'Retry',
+                      style: TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: hasCoords
+                            ? AppColors.verifiedText
+                            : AppColors.error,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
 
-  // ── Section label ──
   Widget _buildSectionLabel(
     String text, {
     bool required = false,
