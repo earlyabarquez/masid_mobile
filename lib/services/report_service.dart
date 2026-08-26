@@ -7,7 +7,6 @@ class ReportService {
 
   Future<void> submitReport({
     required int hazardID,
-    required int brgyID,
     required int severity,
     required String description,
     required double latitude,
@@ -30,7 +29,6 @@ class ReportService {
       data: {
         'userID': userID,
         'hazardID': hazardID,
-        'brgyID': brgyID,
         'statusID': 1, // Pending
         'severity': severity,
         'description': description,

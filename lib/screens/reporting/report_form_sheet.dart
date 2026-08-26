@@ -6,7 +6,6 @@ import 'package:image_picker/image_picker.dart';
 import '../../config/app_colors.dart';
 import '../../services/cloudinary_service.dart';
 import '../../services/hazard_service.dart';
-import '../../services/barangay_service.dart';
 import '../../services/report_service.dart';
 
 // Icon mapping for hazard names (fetched hazards use these icons by name)
@@ -51,14 +50,11 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   final _descCtrl = TextEditingController();
 
   final _hazardService = HazardService();
-  final _barangayService = BarangayService();
   final _reportService = ReportService();
 
   List<HazardType> _hazards = [];
-  List<Barangay> _barangays = [];
 
   int? _selectedHazardID;
-  int? _selectedBrgyID;
   int _severity = 3;
 
   bool _loadingData = true; // fetching hazards + barangays
@@ -90,11 +86,9 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   Future<void> _loadData() async {
     try {
       final hazards = await _hazardService.getHazardTypes();
-      final barangays = await _barangayService.getBarangays();
       if (!mounted) return;
       setState(() {
         _hazards = hazards;
-        _barangays = barangays;
         _loadingData = false;
       });
     } catch (e) {
@@ -158,10 +152,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       setState(() => _errorMessage = 'Please select a hazard type');
       return;
     }
-    if (_selectedBrgyID == null) {
-      setState(() => _errorMessage = 'Please select a barangay');
-      return;
-    }
     if (_lat == null || _lng == null) {
       setState(
         () => _errorMessage =
@@ -189,7 +179,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       // 2. Submit the report to the backend (real GPS coords)
       await _reportService.submitReport(
         hazardID: _selectedHazardID!,
-        brgyID: _selectedBrgyID!,
         severity: _severity,
         description: _descCtrl.text.trim(),
         latitude: _lat!,
@@ -264,10 +253,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                       _buildSectionLabel('Hazard Type', required: true),
                       const SizedBox(height: 8),
                       _buildHazardTypeGrid(),
-                      const SizedBox(height: 20),
-                      _buildSectionLabel('Barangay', required: true),
-                      const SizedBox(height: 8),
-                      _buildBarangayDropdown(),
                       const SizedBox(height: 20),
                       _buildSectionLabel('Severity Level', required: true),
                       const SizedBox(height: 8),
@@ -526,49 +511,6 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
           ),
         );
       }).toList(),
-    );
-  }
-
-  Widget _buildBarangayDropdown() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<int>(
-          value: _selectedBrgyID,
-          isExpanded: true,
-          hint: const Text(
-            'Select barangay',
-            style: TextStyle(
-              fontFamily: 'Sora',
-              fontSize: 13,
-              color: AppColors.label,
-            ),
-          ),
-          icon: const Icon(Icons.keyboard_arrow_down_rounded),
-          items: _barangays.map((b) {
-            return DropdownMenuItem<int>(
-              value: b.brgyID,
-              child: Text(
-                b.brgyName,
-                style: const TextStyle(
-                  fontFamily: 'Sora',
-                  fontSize: 13,
-                  color: AppColors.body,
-                ),
-              ),
-            );
-          }).toList(),
-          onChanged: (val) => setState(() {
-            _selectedBrgyID = val;
-            _errorMessage = null;
-          }),
-        ),
-      ),
     );
   }
 
