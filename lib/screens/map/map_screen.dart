@@ -1,146 +1,55 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
+import '../../services/report_service.dart';
 import '../../widgets/pulsing_marker.dart';
 import 'hazard_detail_sheet.dart';
 
-// ── Mock hazard data (replace with API later) ──
-class MockHazard {
-  final String id;
-  final String type;
-  final String description;
-  final int severity;
-  final double lat;
-  final double lng;
-  final String status;
-  final String date;
-  final String reporter;
-  final String? imageUrl;
-
-  const MockHazard({
-    required this.id,
-    required this.type,
-    required this.description,
-    required this.severity,
-    required this.lat,
-    required this.lng,
-    required this.status,
-    required this.date,
-    required this.reporter,
-    this.imageUrl,
-  });
-
-  Color get color {
-    if (status == 'Critical') return AppColors.error;
-    switch (severity) {
-      case 5:
-        return const Color(0xFFDC2626);
-      case 4:
-        return const Color(0xFFEA580C);
-      case 3:
-        return const Color(0xFFF59E0B);
-      case 2:
-        return const Color(0xFF2563EB);
-      default:
-        return const Color(0xFF16A34A);
-    }
-  }
-
-  IconData get icon {
-    switch (type) {
-      case 'Flood':
-        return Icons.water_rounded;
-      case 'Landslide':
-        return Icons.landscape_rounded;
-      case 'Fire':
-        return Icons.local_fire_department_rounded;
-      case 'Accident':
-        return Icons.car_crash_rounded;
-      case 'Storm Surge':
-        return Icons.thunderstorm_rounded;
-      case 'Earthquake':
-        return Icons.vibration_rounded;
-      default:
-        return Icons.warning_rounded;
-    }
+// ── Marker color by severity (matches admin + report form) ──
+Color severityColor(int severity, String status) {
+  if (status == 'Critical') return AppColors.error;
+  switch (severity) {
+    case 5:
+      return const Color(0xFFDC2626);
+    case 4:
+      return const Color(0xFFEA580C);
+    case 3:
+      return const Color(0xFFF59E0B);
+    case 2:
+      return const Color(0xFF2563EB);
+    default:
+      return const Color(0xFF16A34A);
   }
 }
 
-final List<MockHazard> _mockHazards = [
-  const MockHazard(
-    id: '1',
-    type: 'Flood',
-    description:
-        'Knee-deep flooding along the main road near the public market. Water rising steadily.',
-    severity: 4,
-    lat: 9.7745,
-    lng: 123.9640,
-    status: 'Verified',
-    date: '2026-05-23',
-    reporter: 'Juan D.',
-  ),
-  const MockHazard(
-    id: '2',
-    type: 'Landslide',
-    description:
-        'Soil erosion and partial road blockage on the hillside barangay access road.',
-    severity: 5,
-    lat: 9.7790,
-    lng: 123.9580,
-    status: 'Critical',
-    date: '2026-05-24',
-    reporter: 'Maria S.',
-  ),
-  const MockHazard(
-    id: '3',
-    type: 'Accident',
-    description:
-        'Motorcycle collision at the intersection near the barangay hall.',
-    severity: 3,
-    lat: 9.7710,
-    lng: 123.9700,
-    status: 'Verified',
-    date: '2026-05-22',
-    reporter: 'Pedro C.',
-  ),
-  const MockHazard(
-    id: '4',
-    type: 'Fire',
-    description:
-        'Grass fire spreading near residential area. Smoke visible from the highway.',
-    severity: 4,
-    lat: 9.7680,
-    lng: 123.9620,
-    status: 'Pending',
-    date: '2026-05-24',
-    reporter: 'Ana R.',
-  ),
-  const MockHazard(
-    id: '5',
-    type: 'Storm Surge',
-    description:
-        'Strong waves reported along the coastal barangay. Fishermen advised not to go out.',
-    severity: 3,
-    lat: 9.7760,
-    lng: 123.9720,
-    status: 'Verified',
-    date: '2026-05-21',
-    reporter: 'Carlo M.',
-  ),
-  const MockHazard(
-    id: '6',
-    type: 'Flood',
-    description: 'Flash flood warning in low-lying area near the river.',
-    severity: 5,
-    lat: 9.7720,
-    lng: 123.9560,
-    status: 'Critical',
-    date: '2026-05-24',
-    reporter: 'Elena T.',
-  ),
-];
+// ── Icon by hazard type ──
+IconData hazardIconFor(String type) {
+  switch (type) {
+    case 'Flood':
+      return Icons.water_rounded;
+    case 'Landslide':
+      return Icons.landscape_rounded;
+    case 'Fire':
+      return Icons.local_fire_department_rounded;
+    case 'Accident':
+    case 'Road Accident':
+      return Icons.car_crash_rounded;
+    case 'Storm Surge':
+      return Icons.waves_rounded;
+    case 'Earthquake':
+      return Icons.vibration_rounded;
+    case 'Typhoon':
+      return Icons.thunderstorm_rounded;
+    case 'Flash Flood':
+      return Icons.flood_rounded;
+    default:
+      return Icons.warning_rounded;
+  }
+}
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -151,8 +60,15 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
+  final _reportService = ReportService();
+
+  Timer? _refreshTimer;
   bool _isSatellite = false;
   bool _showLegend = true;
+
+  List<Report> _reports = [];
+  bool _loading = true;
+  String? _error;
 
   // User location (default to Balilihan center)
   final LatLng _userLocation = const LatLng(
@@ -165,12 +81,57 @@ class _MapScreenState extends State<MapScreen> {
   static const String _satelliteTileUrl =
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
-  void _onHazardTapped(MockHazard hazard) {
+  @override
+  void initState() {
+    super.initState();
+    _loadReports();
+    // Auto-refresh every 30 seconds so newly verified reports appear
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _loadReports(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  // Fetch verified reports from the backend (same as the admin risk map).
+  // silent = true skips the loading indicator (used by auto-refresh).
+  Future<void> _loadReports({bool silent = false}) async {
+    try {
+      final reports = await _reportService.getVerifiedReports();
+      if (!mounted) return;
+      setState(() {
+        _reports = reports;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (silent)
+        return; // don't disrupt the map on a background refresh failure
+      if (!mounted) return;
+      String msg;
+      if (e is DioException &&
+          (e.response?.statusCode == 401 || e.response?.statusCode == 403)) {
+        msg = 'Your session expired. Please log out and log in again.';
+      } else {
+        msg = 'Failed to load hazards. Check your connection.';
+      }
+      setState(() {
+        _loading = false;
+        _error = msg;
+      });
+    }
+  }
+
+  void _onHazardTapped(Report report) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => HazardDetailSheet(hazard: hazard),
+      builder: (_) => HazardDetailSheet(report: report),
     );
   }
 
@@ -183,47 +144,71 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          // ── Map ──
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _userLocation,
-              initialZoom: AppConstants.defaultZoom,
-            ),
-            children: [
-              // Tile layer
-              TileLayer(
-                urlTemplate: _isSatellite ? _satelliteTileUrl : _osmTileUrl,
-                userAgentPackageName: 'com.balilihan.masid',
-              ),
+          // ── Map (with pull-to-refresh) ──
+          RefreshIndicator(
+            onRefresh: () => _loadReports(),
+            color: AppColors.primary,
+            edgeOffset: MediaQuery.of(context).padding.top + 68,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                return SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: SizedBox(
+                    height: constraints.maxHeight,
+                    width: constraints.maxWidth,
+                    child: FlutterMap(
+                      mapController: _mapController,
+                      options: MapOptions(
+                        initialCenter: _userLocation,
+                        initialZoom: AppConstants.defaultZoom,
+                      ),
+                      children: [
+                        // Tile layer
+                        TileLayer(
+                          urlTemplate: _isSatellite
+                              ? _satelliteTileUrl
+                              : _osmTileUrl,
+                          userAgentPackageName: 'com.balilihan.masid',
+                        ),
 
-              // Hazard markers
-              MarkerLayer(
-                markers: _mockHazards.map((h) {
-                  return Marker(
-                    point: LatLng(h.lat, h.lng),
-                    width: 48,
-                    height: 48,
-                    child: GestureDetector(
-                      onTap: () => _onHazardTapped(h),
-                      child: PulsingMarker(color: h.color, icon: h.icon),
+                        // Hazard markers (real data)
+                        MarkerLayer(
+                          markers: _reports.map((r) {
+                            return Marker(
+                              point: LatLng(r.latitude, r.longitude),
+                              width: 48,
+                              height: 48,
+                              child: GestureDetector(
+                                onTap: () => _onHazardTapped(r),
+                                child: PulsingMarker(
+                                  color: severityColor(
+                                    r.severity,
+                                    r.statusName,
+                                  ),
+                                  icon: hazardIconFor(r.hazardName),
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+
+                        // User location marker
+                        MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: _userLocation,
+                              width: 36,
+                              height: 36,
+                              child: const _UserLocationDot(),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                  );
-                }).toList(),
-              ),
-
-              // User location marker
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: _userLocation,
-                    width: 36,
-                    height: 36,
-                    child: const _UserLocationDot(),
                   ),
-                ],
-              ),
-            ],
+                );
+              },
+            ),
           ),
 
           // ── Top bar ──
@@ -307,6 +292,96 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
           ),
+
+          // ── Loading / error banner ──
+          if (_loading)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 68,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: const Row(
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    SizedBox(width: 12),
+                    Text(
+                      'Loading hazards...',
+                      style: TextStyle(fontFamily: 'Sora', fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (_error != null && !_loading)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 68,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.error.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: AppColors.error.withValues(alpha: 0.25),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      size: 18,
+                      color: AppColors.error,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _error!,
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          color: AppColors.error,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _loading = true;
+                          _error = null;
+                        });
+                        _loadReports();
+                      },
+                      child: const Text(
+                        'Retry',
+                        style: TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.error,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
 
           // ── My location button ──
           Positioned(

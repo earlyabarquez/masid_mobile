@@ -1,14 +1,28 @@
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
-import 'map_screen.dart';
+import '../../services/report_service.dart';
+import 'map_screen.dart'; // for severityColor + hazardIconFor helpers
 
 class HazardDetailSheet extends StatelessWidget {
-  final MockHazard hazard;
+  final Report report;
 
-  const HazardDetailSheet({super.key, required this.hazard});
+  const HazardDetailSheet({super.key, required this.report});
+
+  String get _dateLabel {
+    if (report.reportDate == null) return '';
+    try {
+      final d = DateTime.parse(report.reportDate!);
+      return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return report.reportDate!;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final color = severityColor(report.severity, report.statusName);
+    final icon = hazardIconFor(report.hazardName);
+
     return Container(
       decoration: const BoxDecoration(
         color: AppColors.surface,
@@ -42,20 +56,20 @@ class HazardDetailSheet extends StatelessWidget {
                       width: 44,
                       height: 44,
                       decoration: BoxDecoration(
-                        color: hazard.color.withValues(alpha: 0.1),
+                        color: color.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(12),
                       ),
-                      child: Icon(hazard.icon, color: hazard.color, size: 22),
+                      child: Icon(icon, color: color, size: 22),
                     ),
                     const SizedBox(width: 14),
 
-                    // Type + status
+                    // Type + reporter
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            hazard.type,
+                            report.hazardName,
                             style: const TextStyle(
                               fontFamily: 'Sora',
                               fontSize: 16,
@@ -65,7 +79,7 @@ class HazardDetailSheet extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            'Reported by ${hazard.reporter} · ${hazard.date}',
+                            'Reported by ${report.reporterName ?? "—"} · $_dateLabel',
                             style: const TextStyle(
                               fontFamily: 'Sora',
                               fontSize: 12,
@@ -77,7 +91,7 @@ class HazardDetailSheet extends StatelessWidget {
                     ),
 
                     // Status badge
-                    _StatusBadge(status: hazard.status),
+                    _StatusBadge(status: report.statusName),
                   ],
                 ),
 
@@ -97,12 +111,12 @@ class HazardDetailSheet extends StatelessWidget {
                     ),
                     const Spacer(),
                     Text(
-                      '${hazard.severity}/5',
+                      '${report.severity}/5',
                       style: TextStyle(
                         fontFamily: 'Sora',
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
-                        color: hazard.color,
+                        color: color,
                       ),
                     ),
                   ],
@@ -111,10 +125,10 @@ class HazardDetailSheet extends StatelessWidget {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: LinearProgressIndicator(
-                    value: hazard.severity / 5,
+                    value: report.severity / 5,
                     minHeight: 6,
                     backgroundColor: AppColors.subtle,
-                    valueColor: AlwaysStoppedAnimation<Color>(hazard.color),
+                    valueColor: AlwaysStoppedAnimation<Color>(color),
                   ),
                 ),
 
@@ -132,7 +146,9 @@ class HazardDetailSheet extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  hazard.description,
+                  report.description.isEmpty
+                      ? 'No description provided.'
+                      : report.description,
                   style: const TextStyle(
                     fontFamily: 'Sora',
                     fontSize: 13,
@@ -160,7 +176,7 @@ class HazardDetailSheet extends StatelessWidget {
                       ),
                       const SizedBox(width: 10),
                       Text(
-                        '${hazard.lat.toStringAsFixed(4)}, ${hazard.lng.toStringAsFixed(4)}',
+                        '${report.latitude.toStringAsFixed(4)}, ${report.longitude.toStringAsFixed(4)}',
                         style: const TextStyle(
                           fontFamily: 'Sora',
                           fontSize: 12,
