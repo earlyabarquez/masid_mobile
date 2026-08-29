@@ -1,178 +1,60 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
+import '../../services/report_service.dart';
+import '../map/map_screen.dart'; // reuse severityColor + hazardIconFor helpers
 import 'report_detail_screen.dart';
 
-// Mock report data (replace with API + offline DB later)
-class MockReport {
-  final String id;
-  final String type;
-  final String description;
-  final int severity;
-  final double lat;
-  final double lng;
-  final String status;
-  final String date;
-  final String? imageUrl;
-  final String? adminNotes;
-
-  const MockReport({
-    required this.id,
-    required this.type,
-    required this.description,
-    required this.severity,
-    required this.lat,
-    required this.lng,
-    required this.status,
-    required this.date,
-    this.imageUrl,
-    this.adminNotes,
-  });
-
-  Color get statusColor {
-    switch (status) {
-      case 'Verified':
-        return AppColors.success;
-      case 'Rejected':
-        return AppColors.error;
-      case 'Critical':
-        return AppColors.error;
-      default:
-        return AppColors.warning;
-    }
-  }
-
-  Color get statusBg {
-    switch (status) {
-      case 'Verified':
-        return AppColors.verifiedBg;
-      case 'Rejected':
-        return AppColors.rejectedBg;
-      case 'Critical':
-        return AppColors.criticalBg;
-      default:
-        return AppColors.pendingBg;
-    }
-  }
-
-  Color get statusText {
-    switch (status) {
-      case 'Verified':
-        return AppColors.verifiedText;
-      case 'Rejected':
-        return AppColors.rejectedText;
-      case 'Critical':
-        return AppColors.criticalText;
-      default:
-        return AppColors.pendingText;
-    }
-  }
-
-  IconData get typeIcon {
-    switch (type) {
-      case 'Flood':
-        return Icons.water_rounded;
-      case 'Landslide':
-        return Icons.landscape_rounded;
-      case 'Fire':
-        return Icons.local_fire_department_rounded;
-      case 'Earthquake':
-        return Icons.vibration_rounded;
-      case 'Road Accident':
-        return Icons.car_crash_rounded;
-      case 'Storm Surge':
-        return Icons.waves_rounded;
-      case 'Typhoon':
-        return Icons.thunderstorm_rounded;
-      case 'Flash Flood':
-        return Icons.flood_rounded;
-      default:
-        return Icons.warning_rounded;
-    }
-  }
-
-  Color get severityColor {
-    switch (severity) {
-      case 5:
-        return const Color(0xFFDC2626);
-      case 4:
-        return const Color(0xFFEA580C);
-      case 3:
-        return const Color(0xFFF59E0B);
-      case 2:
-        return const Color(0xFF2563EB);
-      default:
-        return const Color(0xFF16A34A);
-    }
+// ── Status → colors (used by both this screen and the detail screen) ──
+Color statusColor(String status) {
+  switch (status) {
+    case 'Verified':
+      return AppColors.success;
+    case 'Rejected':
+      return AppColors.error;
+    case 'Critical':
+      return AppColors.error;
+    default:
+      return AppColors.warning;
   }
 }
 
-final List<MockReport> _mockReports = [
-  const MockReport(
-    id: '1',
-    type: 'Flood',
-    description:
-        'Knee-deep flooding along the main road near the public market.',
-    severity: 4,
-    lat: 9.7745,
-    lng: 123.9640,
-    status: 'Verified',
-    date: '2026-05-23',
-  ),
-  const MockReport(
-    id: '2',
-    type: 'Landslide',
-    description:
-        'Soil erosion and partial road blockage on the hillside access road.',
-    severity: 5,
-    lat: 9.7790,
-    lng: 123.9580,
-    status: 'Critical',
-    date: '2026-05-24',
-  ),
-  const MockReport(
-    id: '3',
-    type: 'Road Accident',
-    description:
-        'Motorcycle collision at the intersection near the barangay hall.',
-    severity: 3,
-    lat: 9.7710,
-    lng: 123.9700,
-    status: 'Rejected',
-    date: '2026-05-22',
-    adminNotes:
-        'Duplicate report. This incident was already reported by another responder.',
-  ),
-  const MockReport(
-    id: '4',
-    type: 'Fire',
-    description: 'Grass fire spreading near residential area.',
-    severity: 4,
-    lat: 9.7680,
-    lng: 123.9620,
-    status: 'Pending',
-    date: '2026-05-24',
-  ),
-  const MockReport(
-    id: '5',
-    type: 'Flash Flood',
-    description: 'Flash flood warning in low-lying area near the river.',
-    severity: 5,
-    lat: 9.7720,
-    lng: 123.9560,
-    status: 'Critical',
-    date: '2026-05-24',
-  ),
-  const MockReport(
-    id: '6',
-    type: 'Storm Surge',
-    description: 'Strong waves along the coastal barangay.',
-    severity: 3,
-    lat: 9.7760,
-    lng: 123.9720,
-    status: 'Verified',
-    date: '2026-05-21',
-  ),
-];
+Color statusBg(String status) {
+  switch (status) {
+    case 'Verified':
+      return AppColors.verifiedBg;
+    case 'Rejected':
+      return AppColors.rejectedBg;
+    case 'Critical':
+      return AppColors.criticalBg;
+    default:
+      return AppColors.pendingBg;
+  }
+}
+
+Color statusText(String status) {
+  switch (status) {
+    case 'Verified':
+      return AppColors.verifiedText;
+    case 'Rejected':
+      return AppColors.rejectedText;
+    case 'Critical':
+      return AppColors.criticalText;
+    default:
+      return AppColors.pendingText;
+  }
+}
+
+// Format an ISO date string to YYYY-MM-DD (falls back to the raw string)
+String formatReportDate(String? iso) {
+  if (iso == null) return '';
+  try {
+    final d = DateTime.parse(iso);
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  } catch (_) {
+    return iso;
+  }
+}
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
@@ -182,23 +64,61 @@ class ReportsScreen extends StatefulWidget {
 }
 
 class _ReportsScreenState extends State<ReportsScreen> {
+  final _reportService = ReportService();
+
   String _activeFilter = 'All';
-  bool _isRefreshing = false;
-  final int _pendingSyncCount = 2; // Mock offline queue count
+  List<Report> _reports = [];
+  bool _loading = true;
+  String? _error;
+  Timer? _refreshTimer;
+
+  // Offline queue count — 0 until offline mode (SQLite) is built later.
+  final int _pendingSyncCount = 0;
 
   final _filters = ['All', 'Pending', 'Verified', 'Rejected', 'Critical'];
 
-  List<MockReport> get _filteredReports {
-    if (_activeFilter == 'All') return _mockReports;
-    return _mockReports.where((r) => r.status == _activeFilter).toList();
+  @override
+  void initState() {
+    super.initState();
+    _loadReports();
+    // Auto-refresh every 30s so status changes (verify/reject) show up
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _loadReports(silent: true);
+    });
   }
 
-  Future<void> _onRefresh() async {
-    setState(() => _isRefreshing = true);
-    // TODO: Fetch from Spring Boot API
-    await Future.delayed(const Duration(seconds: 1));
-    if (!mounted) return;
-    setState(() => _isRefreshing = false);
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadReports({bool silent = false}) async {
+    try {
+      final reports = await _reportService.getMyReports();
+      // Newest first (most recent report at the top)
+      reports.sort(
+        (a, b) => (b.reportDate ?? '').compareTo(a.reportDate ?? ''),
+      );
+      if (!mounted) return;
+      setState(() {
+        _reports = reports;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (silent) return; // don't disrupt on a background refresh failure
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Failed to load your reports. Pull down to retry.';
+      });
+    }
+  }
+
+  List<Report> get _filteredReports {
+    if (_activeFilter == 'All') return _reports;
+    return _reports.where((r) => r.statusName == _activeFilter).toList();
   }
 
   @override
@@ -212,7 +132,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
             // ── Header ──
             _buildHeader(),
 
-            // ── Sync banner ──
+            // ── Sync banner (only when there are unsynced reports) ──
             if (_pendingSyncCount > 0) _buildSyncBanner(),
 
             // ── Filter chips ──
@@ -221,23 +141,72 @@ class _ReportsScreenState extends State<ReportsScreen> {
             const SizedBox(height: 4),
 
             // ── Report list ──
-            Expanded(
-              child: _filteredReports.isEmpty
-                  ? _buildEmptyState()
-                  : RefreshIndicator(
-                      onRefresh: _onRefresh,
-                      color: AppColors.primary,
-                      child: ListView.separated(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        itemCount: _filteredReports.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 10),
-                        itemBuilder: (_, i) =>
-                            _buildReportCard(_filteredReports[i]),
+            Expanded(child: _buildBody()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return RefreshIndicator(
+        onRefresh: () => _loadReports(),
+        color: AppColors.primary,
+        child: ListView(
+          children: [
+            SizedBox(height: MediaQuery.of(context).size.height * 0.3),
+            Center(
+              child: Column(
+                children: [
+                  const Icon(
+                    Icons.error_outline_rounded,
+                    size: 48,
+                    color: AppColors.error,
+                  ),
+                  const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 40),
+                    child: Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 13,
+                        color: AppColors.muted,
                       ),
                     ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
+      );
+    }
+    if (_filteredReports.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: () => _loadReports(),
+        color: AppColors.primary,
+        child: ListView(
+          children: [
+            SizedBox(height: MediaQuery.of(context).size.height * 0.25),
+            _buildEmptyState(),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _loadReports(),
+      color: AppColors.primary,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        itemCount: _filteredReports.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        itemBuilder: (_, i) => _buildReportCard(_filteredReports[i]),
       ),
     );
   }
@@ -282,7 +251,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
               border: Border.all(color: AppColors.primaryBorder),
             ),
             child: Text(
-              '${_mockReports.length}',
+              '${_reports.length}',
               style: const TextStyle(
                 fontFamily: 'Sora',
                 fontSize: 14,
@@ -296,7 +265,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     );
   }
 
-  // ── Sync banner ──
+  // ── Sync banner (offline queue — wired for later SQLite offline mode) ──
   Widget _buildSyncBanner() {
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
@@ -327,7 +296,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
           ),
           GestureDetector(
             onTap: () {
-              // TODO: Trigger manual sync
+              // TODO: Trigger manual sync once offline mode (SQLite) is built
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text(
@@ -373,8 +342,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
           final filter = _filters[i];
           final isActive = _activeFilter == filter;
           final count = filter == 'All'
-              ? _mockReports.length
-              : _mockReports.where((r) => r.status == filter).length;
+              ? _reports.length
+              : _reports.where((r) => r.statusName == filter).length;
 
           return GestureDetector(
             onTap: () => setState(() => _activeFilter = filter),
@@ -431,7 +400,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   // ── Report card ──
-  Widget _buildReportCard(MockReport report) {
+  Widget _buildReportCard(Report report) {
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
@@ -451,12 +420,15 @@ class _ReportsScreenState extends State<ReportsScreen> {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                color: report.severityColor.withValues(alpha: 0.1),
+                color: severityColor(
+                  report.severity,
+                  report.statusName,
+                ).withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
-                report.typeIcon,
-                color: report.severityColor,
+                hazardIconFor(report.hazardName),
+                color: severityColor(report.severity, report.statusName),
                 size: 22,
               ),
             ),
@@ -471,7 +443,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                     children: [
                       Expanded(
                         child: Text(
-                          report.type,
+                          report.hazardName,
                           style: const TextStyle(
                             fontFamily: 'Sora',
                             fontSize: 14,
@@ -487,16 +459,16 @@ class _ReportsScreenState extends State<ReportsScreen> {
                           vertical: 3,
                         ),
                         decoration: BoxDecoration(
-                          color: report.statusBg,
+                          color: statusBg(report.statusName),
                           borderRadius: BorderRadius.circular(100),
                         ),
                         child: Text(
-                          report.status,
+                          report.statusName,
                           style: TextStyle(
                             fontFamily: 'Sora',
                             fontSize: 10,
                             fontWeight: FontWeight.w700,
-                            color: report.statusText,
+                            color: statusText(report.statusName),
                           ),
                         ),
                       ),
@@ -504,7 +476,9 @@ class _ReportsScreenState extends State<ReportsScreen> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    report.description,
+                    report.description.isEmpty
+                        ? 'No description'
+                        : report.description,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -516,14 +490,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      Icon(
+                      const Icon(
                         Icons.calendar_today_rounded,
                         size: 12,
                         color: AppColors.label,
                       ),
                       const SizedBox(width: 4),
                       Text(
-                        report.date,
+                        formatReportDate(report.reportDate),
                         style: const TextStyle(
                           fontFamily: 'Sora',
                           fontSize: 11,
@@ -540,7 +514,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: i < report.severity
-                                ? report.severityColor
+                                ? severityColor(
+                                    report.severity,
+                                    report.statusName,
+                                  )
                                 : AppColors.border,
                           ),
                         );
@@ -569,7 +546,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.inbox_rounded, size: 56, color: AppColors.border),
+          const Icon(Icons.inbox_rounded, size: 56, color: AppColors.border),
           const SizedBox(height: 14),
           const Text(
             'No reports found',
@@ -582,7 +559,9 @@ class _ReportsScreenState extends State<ReportsScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            'No ${_activeFilter.toLowerCase()} reports yet',
+            _activeFilter == 'All'
+                ? "You haven't submitted any reports yet"
+                : 'No ${_activeFilter.toLowerCase()} reports',
             style: const TextStyle(
               fontFamily: 'Sora',
               fontSize: 12,

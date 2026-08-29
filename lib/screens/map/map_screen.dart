@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import '../../services/report_service.dart';
+import '../../services/proximity_service.dart';
 import '../../widgets/pulsing_marker.dart';
 import 'hazard_detail_sheet.dart';
 
@@ -70,11 +72,12 @@ class _MapScreenState extends State<MapScreen> {
   bool _loading = true;
   String? _error;
 
-  // User location (default to Balilihan center)
-  final LatLng _userLocation = const LatLng(
+  // User location — starts at Balilihan center, updated to real GPS on load
+  LatLng _userLocation = const LatLng(
     AppConstants.defaultLat,
     AppConstants.defaultLng,
   );
+  bool _hasRealLocation = false;
 
   static const String _osmTileUrl =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
@@ -85,10 +88,42 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     _loadReports();
+    _initLocation();
     // Auto-refresh every 30 seconds so newly verified reports appear
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _loadReports(silent: true);
     });
+  }
+
+  // Get the user's real location for the map dot + start proximity watching
+  Future<void> _initLocation() async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return;
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      if (!mounted) return;
+      setState(() {
+        _userLocation = LatLng(pos.latitude, pos.longitude);
+        _hasRealLocation = true;
+      });
+
+      // Start proximity watching (foreground) — alerts on hazards within 100m
+      await ProximityService.instance.start();
+    } catch (_) {
+      // keep the default center if location fails
+    }
   }
 
   @override
@@ -108,6 +143,8 @@ class _MapScreenState extends State<MapScreen> {
         _loading = false;
         _error = null;
       });
+      // Give the proximity watcher the latest verified hazards to check against
+      ProximityService.instance.updateHazards(reports);
     } catch (e) {
       if (silent)
         return; // don't disrupt the map on a background refresh failure

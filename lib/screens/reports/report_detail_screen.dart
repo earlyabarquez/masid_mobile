@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
-import 'reports_screen.dart';
+import '../../services/report_service.dart';
+import '../map/map_screen.dart'; // severityColor + hazardIconFor
+import 'reports_screen.dart'; // statusBg + statusText + formatReportDate
 
 class ReportDetailScreen extends StatelessWidget {
-  final MockReport report;
+  final Report report;
 
   const ReportDetailScreen({super.key, required this.report});
 
   @override
   Widget build(BuildContext context) {
+    final sevColor = severityColor(report.severity, report.statusName);
+
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
@@ -40,12 +44,12 @@ class ReportDetailScreen extends StatelessWidget {
                         width: 48,
                         height: 48,
                         decoration: BoxDecoration(
-                          color: report.severityColor.withValues(alpha: 0.1),
+                          color: sevColor.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
-                          report.typeIcon,
-                          color: report.severityColor,
+                          hazardIconFor(report.hazardName),
+                          color: sevColor,
                           size: 24,
                         ),
                       ),
@@ -55,7 +59,7 @@ class ReportDetailScreen extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              report.type,
+                              report.hazardName,
                               style: const TextStyle(
                                 fontFamily: 'Sora',
                                 fontSize: 18,
@@ -65,7 +69,7 @@ class ReportDetailScreen extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              'Reported on ${report.date}',
+                              'Reported on ${formatReportDate(report.reportDate)}',
                               style: const TextStyle(
                                 fontFamily: 'Sora',
                                 fontSize: 12,
@@ -81,16 +85,16 @@ class ReportDetailScreen extends StatelessWidget {
                           vertical: 5,
                         ),
                         decoration: BoxDecoration(
-                          color: report.statusBg,
+                          color: statusBg(report.statusName),
                           borderRadius: BorderRadius.circular(100),
                         ),
                         child: Text(
-                          report.status,
+                          report.statusName,
                           style: TextStyle(
                             fontFamily: 'Sora',
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
-                            color: report.statusText,
+                            color: statusText(report.statusName),
                           ),
                         ),
                       ),
@@ -113,8 +117,8 @@ class ReportDetailScreen extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(11),
-                child: report.imageUrl != null
-                    ? Image.network(report.imageUrl!, fit: BoxFit.cover)
+                child: report.imageURL != null
+                    ? Image.network(report.imageURL!, fit: BoxFit.cover)
                     : const Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -170,7 +174,7 @@ class ReportDetailScreen extends StatelessWidget {
                           fontFamily: 'Sora',
                           fontSize: 14,
                           fontWeight: FontWeight.w800,
-                          color: report.severityColor,
+                          color: sevColor,
                         ),
                       ),
                     ],
@@ -182,9 +186,7 @@ class ReportDetailScreen extends StatelessWidget {
                       value: report.severity / 5,
                       minHeight: 8,
                       backgroundColor: AppColors.subtle,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        report.severityColor,
-                      ),
+                      valueColor: AlwaysStoppedAnimation<Color>(sevColor),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -205,7 +207,7 @@ class ReportDetailScreen extends StatelessWidget {
                             fontFamily: 'Sora',
                             fontSize: 10,
                             fontWeight: FontWeight.w600,
-                            color: report.severityColor,
+                            color: sevColor,
                           ),
                         ),
                       );
@@ -240,7 +242,9 @@ class ReportDetailScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    report.description,
+                    report.description.isEmpty
+                        ? 'No description provided.'
+                        : report.description,
                     style: const TextStyle(
                       fontFamily: 'Sora',
                       fontSize: 13,
@@ -293,13 +297,24 @@ class ReportDetailScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${report.lat.toStringAsFixed(4)}, ${report.lng.toStringAsFixed(4)}',
+                          '${report.latitude.toStringAsFixed(4)}, ${report.longitude.toStringAsFixed(4)}',
                           style: const TextStyle(
                             fontFamily: 'Sora',
                             fontSize: 12,
                             color: AppColors.muted,
                           ),
                         ),
+                        if (report.address != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            report.address!,
+                            style: const TextStyle(
+                              fontFamily: 'Sora',
+                              fontSize: 11,
+                              color: AppColors.label,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -308,7 +323,9 @@ class ReportDetailScreen extends StatelessWidget {
             ),
 
             // ── Admin rejection notes ──
-            if (report.status == 'Rejected' && report.adminNotes != null) ...[
+            if (report.statusName == 'Rejected' &&
+                report.adminNotes != null &&
+                report.adminNotes!.trim().isNotEmpty) ...[
               const SizedBox(height: 12),
               Container(
                 width: double.infinity,

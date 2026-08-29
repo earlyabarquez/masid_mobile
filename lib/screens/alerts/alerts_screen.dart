@@ -1,155 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
-import '../reports/reports_screen.dart';
-import '../reports/report_detail_screen.dart';
-
-// ── Alert types ──
-enum AlertType { hazard, statusUpdate }
-
-class MockAlert {
-  final String id;
-  final AlertType type;
-  final String title;
-  final String message;
-  final String time;
-  final bool isRead;
-  final double? distance;
-  final String? direction;
-  final String? hazardType;
-  final String? reportStatus;
-  final MockReport? linkedReport;
-
-  const MockAlert({
-    required this.id,
-    required this.type,
-    required this.title,
-    required this.message,
-    required this.time,
-    this.isRead = false,
-    this.distance,
-    this.direction,
-    this.hazardType,
-    this.reportStatus,
-    this.linkedReport,
-  });
-
-  IconData get icon {
-    if (type == AlertType.statusUpdate) {
-      switch (reportStatus) {
-        case 'Verified':
-          return Icons.check_circle_rounded;
-        case 'Rejected':
-          return Icons.cancel_rounded;
-        default:
-          return Icons.info_rounded;
-      }
-    }
-    switch (hazardType) {
-      case 'Flood':
-        return Icons.water_rounded;
-      case 'Landslide':
-        return Icons.landscape_rounded;
-      case 'Fire':
-        return Icons.local_fire_department_rounded;
-      case 'Earthquake':
-        return Icons.vibration_rounded;
-      case 'Road Accident':
-        return Icons.car_crash_rounded;
-      case 'Flash Flood':
-        return Icons.flood_rounded;
-      default:
-        return Icons.warning_rounded;
-    }
-  }
-
-  Color get iconColor {
-    if (type == AlertType.statusUpdate) {
-      switch (reportStatus) {
-        case 'Verified':
-          return AppColors.success;
-        case 'Rejected':
-          return AppColors.error;
-        default:
-          return AppColors.primary;
-      }
-    }
-    return AppColors.error;
-  }
-
-  Color get iconBg {
-    return iconColor.withValues(alpha: 0.1);
-  }
-}
-
-// ── Mock data ──
-final List<MockAlert> _initialAlerts = [
-  const MockAlert(
-    id: '1',
-    type: AlertType.hazard,
-    title: 'Flood Nearby',
-    message:
-        'A flood has been reported near your current location. Stay alert and avoid low-lying areas.',
-    time: '2 min ago',
-    isRead: false,
-    distance: 120,
-    direction: 'NW',
-    hazardType: 'Flood',
-  ),
-  const MockAlert(
-    id: '2',
-    type: AlertType.statusUpdate,
-    title: 'Report Verified',
-    message:
-        'Your flood report at Poblacion has been verified by the admin and is now visible on the risk map.',
-    time: '15 min ago',
-    isRead: false,
-    reportStatus: 'Verified',
-  ),
-  const MockAlert(
-    id: '3',
-    type: AlertType.hazard,
-    title: 'Landslide Alert',
-    message:
-        'A critical landslide has been reported. Avoid the hillside barangay access road.',
-    time: '1 hr ago',
-    isRead: false,
-    distance: 280,
-    direction: 'SE',
-    hazardType: 'Landslide',
-  ),
-  const MockAlert(
-    id: '4',
-    type: AlertType.statusUpdate,
-    title: 'Report Rejected',
-    message:
-        'Your road accident report was rejected. Reason: Duplicate report already submitted by another responder.',
-    time: '3 hrs ago',
-    isRead: true,
-    reportStatus: 'Rejected',
-  ),
-  const MockAlert(
-    id: '5',
-    type: AlertType.hazard,
-    title: 'Fire Reported',
-    message:
-        'A grass fire has been reported near the residential area. Smoke may be visible from your location.',
-    time: '5 hrs ago',
-    isRead: true,
-    distance: 450,
-    direction: 'SW',
-    hazardType: 'Fire',
-  ),
-  const MockAlert(
-    id: '6',
-    type: AlertType.statusUpdate,
-    title: 'Report Verified',
-    message:
-        'Your storm surge report along the coastal barangay has been verified.',
-    time: 'Yesterday',
-    isRead: true,
-    reportStatus: 'Verified',
-  ),
-];
+import '../../services/alert_service.dart';
+import '../map/map_screen.dart'; // reuse hazardIconFor for hazard alerts
 
 class AlertsScreen extends StatefulWidget {
   const AlertsScreen({super.key});
@@ -159,97 +12,82 @@ class AlertsScreen extends StatefulWidget {
 }
 
 class _AlertsScreenState extends State<AlertsScreen> {
-  late List<MockAlert> _alerts;
+  final _alertService = AlertService();
+
+  List<AppAlert> _alerts = [];
+  bool _loading = true;
+  String? _error;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
-    _alerts = List.from(_initialAlerts);
+    _loadAlerts();
+    // Auto-refresh every 15s so new alerts appear
+    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _loadAlerts(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadAlerts({bool silent = false}) async {
+    try {
+      final alerts = await _alertService.getMyAlerts();
+      // Newest first
+      alerts.sort((a, b) => (b.createdAt ?? '').compareTo(a.createdAt ?? ''));
+      if (!mounted) return;
+      setState(() {
+        _alerts = alerts;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (silent) return;
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Failed to load alerts. Pull down to retry.';
+      });
+    }
   }
 
   int get _unreadCount => _alerts.where((a) => !a.isRead).length;
 
-  void _markAsRead(String id) {
-    setState(() {
-      final index = _alerts.indexWhere((a) => a.id == id);
-      if (index != -1) {
-        final alert = _alerts[index];
-        _alerts[index] = MockAlert(
-          id: alert.id,
-          type: alert.type,
-          title: alert.title,
-          message: alert.message,
-          time: alert.time,
-          isRead: true,
-          distance: alert.distance,
-          direction: alert.direction,
-          hazardType: alert.hazardType,
-          reportStatus: alert.reportStatus,
-          linkedReport: alert.linkedReport,
-        );
-      }
-    });
-  }
-
-  void _markAllAsRead() {
-    setState(() {
-      _alerts = _alerts
-          .map(
-            (a) => MockAlert(
-              id: a.id,
-              type: a.type,
-              title: a.title,
-              message: a.message,
-              time: a.time,
-              isRead: true,
-              distance: a.distance,
-              direction: a.direction,
-              hazardType: a.hazardType,
-              reportStatus: a.reportStatus,
-              linkedReport: a.linkedReport,
-            ),
-          )
-          .toList();
-    });
-  }
-
-  void _onAlertTapped(MockAlert alert) {
-    _markAsRead(alert.id);
-
-    if (alert.type == AlertType.hazard) {
-      // TODO: Navigate to Map centered on the hazard location
-      // For now, switch to Map tab via callback
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Navigating to ${alert.hazardType} location on map...',
-            style: const TextStyle(fontFamily: 'Sora'),
-          ),
-          duration: const Duration(seconds: 1),
-          backgroundColor: AppColors.primary,
-        ),
-      );
-    } else if (alert.type == AlertType.statusUpdate) {
-      // Navigate to report detail if linked report exists
-      // TODO: Link to actual report from API
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Opening ${alert.reportStatus?.toLowerCase()} report details...',
-            style: const TextStyle(fontFamily: 'Sora'),
-          ),
-          duration: const Duration(seconds: 1),
-          backgroundColor: alert.reportStatus == 'Verified'
-              ? AppColors.success
-              : AppColors.error,
-        ),
-      );
+  Future<void> _markAsRead(AppAlert alert) async {
+    if (alert.isRead) return;
+    setState(() => alert.isRead = true); // optimistic
+    try {
+      await _alertService.markAsRead(alert.alertID);
+    } catch (_) {
+      // revert on failure
+      if (mounted) setState(() => alert.isRead = false);
     }
   }
 
-  Future<void> _onRefresh() async {
-    // TODO: Fetch from API
-    await Future.delayed(const Duration(seconds: 1));
+  Future<void> _markAllAsRead() async {
+    final previous = _alerts.map((a) => a.isRead).toList();
+    setState(() {
+      for (final a in _alerts) {
+        a.isRead = true;
+      }
+    });
+    try {
+      await _alertService.markAllAsRead();
+    } catch (_) {
+      // revert on failure
+      if (mounted) {
+        setState(() {
+          for (int i = 0; i < _alerts.length; i++) {
+            _alerts[i].isRead = previous[i];
+          }
+        });
+      }
+    }
   }
 
   @override
@@ -259,26 +97,63 @@ class _AlertsScreenState extends State<AlertsScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ── Header ──
             _buildHeader(),
+            Expanded(child: _buildBody()),
+          ],
+        ),
+      ),
+    );
+  }
 
-            // ── Alert list ──
-            Expanded(
-              child: _alerts.isEmpty
-                  ? _buildEmptyState()
-                  : RefreshIndicator(
-                      onRefresh: _onRefresh,
-                      color: AppColors.primary,
-                      child: ListView.separated(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        itemCount: _alerts.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 8),
-                        itemBuilder: (_, i) => _buildAlertCard(_alerts[i]),
-                      ),
-                    ),
+  Widget _buildBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return RefreshIndicator(
+        onRefresh: () => _loadAlerts(),
+        color: AppColors.primary,
+        child: ListView(
+          children: [
+            SizedBox(height: MediaQuery.of(context).size.height * 0.3),
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 40),
+                child: Text(
+                  _error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontFamily: 'Sora',
+                    fontSize: 13,
+                    color: AppColors.muted,
+                  ),
+                ),
+              ),
             ),
           ],
         ),
+      );
+    }
+    if (_alerts.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: () => _loadAlerts(),
+        color: AppColors.primary,
+        child: ListView(
+          children: [
+            SizedBox(height: MediaQuery.of(context).size.height * 0.22),
+            _buildEmptyState(),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _loadAlerts(),
+      color: AppColors.primary,
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        itemCount: _alerts.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (_, i) => _buildAlertCard(_alerts[i]),
       ),
     );
   }
@@ -356,36 +231,106 @@ class _AlertsScreenState extends State<AlertsScreen> {
     );
   }
 
+  // Known hazard type names (match the map's hazard-type selection)
+  static const List<String> _hazardTypes = [
+    'Flood',
+    'Landslide',
+    'Earthquake',
+    'Fire',
+    'Typhoon',
+    'Storm Surge',
+    'Drought',
+    'Sinkhole',
+    'Road Accident',
+    'Structural Collapse',
+    'Flash Flood',
+    'Soil Erosion',
+    'Power Outage',
+    'Water Contamination',
+    'Fallen Tree',
+    'Animal Hazard',
+    'Other',
+  ];
+
+  // Detect which hazard type an alert refers to, from its title/message
+  String? _hazardTypeOf(AppAlert a) {
+    final text = '${a.title} ${a.message}';
+    // Check longer names first so "Flash Flood" wins over "Flood"
+    final sorted = [..._hazardTypes]
+      ..sort((x, y) => y.length.compareTo(x.length));
+    for (final t in sorted) {
+      if (text.contains(t)) return t;
+    }
+    return null;
+  }
+
+  // Icon + color per alert
+  IconData _alertIcon(AppAlert a) {
+    if (a.type == 'statusUpdate') {
+      if (a.title.contains('Verified')) return Icons.check_circle_rounded;
+      if (a.title.contains('Rejected')) return Icons.cancel_rounded;
+      return Icons.info_rounded;
+    }
+    // hazard alert — use the same icon as the map's hazard-type selection
+    final type = _hazardTypeOf(a);
+    return type != null ? hazardIconFor(type) : Icons.warning_rounded;
+  }
+
+  Color _alertColor(AppAlert a) {
+    if (a.type == 'statusUpdate') {
+      if (a.title.contains('Verified')) return AppColors.success;
+      if (a.title.contains('Rejected')) return AppColors.error;
+      return AppColors.primary;
+    }
+    return AppColors.error; // hazard
+  }
+
+  String _timeAgo(String? iso) {
+    if (iso == null) return '';
+    try {
+      final then = DateTime.parse(iso);
+      final diff = DateTime.now().difference(then);
+      if (diff.inMinutes < 1) return 'just now';
+      if (diff.inMinutes < 60) return '${diff.inMinutes} min ago';
+      if (diff.inHours < 24) return '${diff.inHours} hr ago';
+      if (diff.inDays == 1) return 'Yesterday';
+      return '${diff.inDays} days ago';
+    } catch (_) {
+      return '';
+    }
+  }
+
   // ── Alert card ──
-  Widget _buildAlertCard(MockAlert alert) {
+  Widget _buildAlertCard(AppAlert alert) {
+    final color = _alertColor(alert);
+    final isHazard = alert.type == 'hazard';
+
     return GestureDetector(
-      onTap: () => _onAlertTapped(alert),
+      onTap: () => _markAsRead(alert),
       child: Container(
         decoration: BoxDecoration(
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: !alert.isRead
-                ? alert.iconColor.withValues(alpha: 0.3)
+                ? color.withValues(alpha: 0.3)
                 : AppColors.border,
           ),
         ),
         child: IntrinsicHeight(
           child: Row(
             children: [
-              // ── Left accent bar (unread) ──
+              // Left accent bar (unread)
               if (!alert.isRead)
                 Container(
                   width: 4,
                   decoration: BoxDecoration(
-                    color: alert.iconColor,
+                    color: color,
                     borderRadius: const BorderRadius.horizontal(
                       left: Radius.circular(12),
                     ),
                   ),
                 ),
-
-              // ── Content ──
               Expanded(
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(
@@ -402,23 +347,17 @@ class _AlertsScreenState extends State<AlertsScreen> {
                         width: 40,
                         height: 40,
                         decoration: BoxDecoration(
-                          color: alert.iconBg,
+                          color: color.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: Icon(
-                          alert.icon,
-                          color: alert.iconColor,
-                          size: 20,
-                        ),
+                        child: Icon(_alertIcon(alert), color: color, size: 20),
                       ),
                       const SizedBox(width: 12),
-
                       // Text content
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Title + type badge
                             Row(
                               children: [
                                 Expanded(
@@ -440,7 +379,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                     vertical: 2,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: alert.type == AlertType.hazard
+                                    color: isHazard
                                         ? AppColors.error.withValues(
                                             alpha: 0.08,
                                           )
@@ -450,14 +389,12 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                     borderRadius: BorderRadius.circular(100),
                                   ),
                                   child: Text(
-                                    alert.type == AlertType.hazard
-                                        ? 'HAZARD'
-                                        : 'UPDATE',
+                                    isHazard ? 'HAZARD' : 'UPDATE',
                                     style: TextStyle(
                                       fontFamily: 'Sora',
                                       fontSize: 9,
                                       fontWeight: FontWeight.w700,
-                                      color: alert.type == AlertType.hazard
+                                      color: isHazard
                                           ? AppColors.error
                                           : AppColors.primary,
                                       letterSpacing: 0.5,
@@ -466,13 +403,10 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                 ),
                               ],
                             ),
-
                             const SizedBox(height: 4),
-
-                            // Message
                             Text(
                               alert.message,
-                              maxLines: 2,
+                              maxLines: 3,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontFamily: 'Sora',
@@ -483,53 +417,23 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                 height: 1.5,
                               ),
                             ),
-
                             const SizedBox(height: 8),
-
-                            // Bottom row: time + distance
                             Row(
                               children: [
-                                Icon(
+                                const Icon(
                                   Icons.access_time_rounded,
                                   size: 12,
                                   color: AppColors.label,
                                 ),
                                 const SizedBox(width: 4),
                                 Text(
-                                  alert.time,
+                                  _timeAgo(alert.createdAt),
                                   style: const TextStyle(
                                     fontFamily: 'Sora',
                                     fontSize: 11,
                                     color: AppColors.label,
                                   ),
                                 ),
-                                if (alert.distance != null) ...[
-                                  const SizedBox(width: 12),
-                                  Container(
-                                    width: 3,
-                                    height: 3,
-                                    decoration: const BoxDecoration(
-                                      color: AppColors.label,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Icon(
-                                    Icons.near_me_rounded,
-                                    size: 12,
-                                    color: AppColors.error,
-                                  ),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    '~${alert.distance!.toInt()}m ${alert.direction ?? ''}',
-                                    style: const TextStyle(
-                                      fontFamily: 'Sora',
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.error,
-                                    ),
-                                  ),
-                                ],
                               ],
                             ),
                           ],
@@ -569,7 +473,8 @@ class _AlertsScreenState extends State<AlertsScreen> {
           ),
           SizedBox(height: 4),
           Text(
-            'You\'ll be notified of nearby hazards',
+            "You'll be notified of nearby hazards and report updates",
+            textAlign: TextAlign.center,
             style: TextStyle(
               fontFamily: 'Sora',
               fontSize: 12,
