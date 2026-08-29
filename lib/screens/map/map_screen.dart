@@ -30,24 +30,41 @@ Color severityColor(int severity, String status) {
 
 // ── Icon by hazard type ──
 IconData hazardIconFor(String type) {
+  // Matches the report form's hazard icon set (all 17 types)
   switch (type) {
     case 'Flood':
       return Icons.water_rounded;
     case 'Landslide':
       return Icons.landscape_rounded;
+    case 'Earthquake':
+      return Icons.vibration_rounded;
     case 'Fire':
       return Icons.local_fire_department_rounded;
+    case 'Typhoon':
+      return Icons.thunderstorm_rounded;
+    case 'Storm Surge':
+      return Icons.waves_rounded;
+    case 'Drought':
+      return Icons.wb_sunny_rounded;
+    case 'Sinkhole':
+      return Icons.circle_outlined;
     case 'Accident':
     case 'Road Accident':
       return Icons.car_crash_rounded;
-    case 'Storm Surge':
-      return Icons.waves_rounded;
-    case 'Earthquake':
-      return Icons.vibration_rounded;
-    case 'Typhoon':
-      return Icons.thunderstorm_rounded;
+    case 'Structural Collapse':
+      return Icons.domain_disabled_rounded;
     case 'Flash Flood':
       return Icons.flood_rounded;
+    case 'Soil Erosion':
+      return Icons.terrain_rounded;
+    case 'Power Outage':
+      return Icons.power_off_rounded;
+    case 'Water Contamination':
+      return Icons.water_drop_rounded;
+    case 'Fallen Tree':
+      return Icons.park_rounded;
+    case 'Animal Hazard':
+      return Icons.pets_rounded;
     default:
       return Icons.warning_rounded;
   }

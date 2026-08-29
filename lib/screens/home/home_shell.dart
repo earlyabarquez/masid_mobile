@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
 import '../map/map_screen.dart';
@@ -5,6 +6,7 @@ import '../reports/reports_screen.dart';
 import '../reporting/camera_screen.dart';
 import '../alerts/alerts_screen.dart';
 import '../profile/profile_screen.dart';
+import '../../services/alert_service.dart';
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
@@ -16,6 +18,10 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _currentIndex = 0;
 
+  final _alertService = AlertService();
+  int _unreadAlerts = 0;
+  Timer? _unreadTimer;
+
   final _screens = const [
     MapScreen(),
     ReportsScreen(),
@@ -23,6 +29,32 @@ class _HomeShellState extends State<HomeShell> {
     AlertsScreen(),
     ProfileScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshUnread();
+    // Poll the unread count every 15s so the badge stays current
+    _unreadTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      _refreshUnread();
+    });
+  }
+
+  @override
+  void dispose() {
+    _unreadTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshUnread() async {
+    try {
+      final count = await _alertService.unreadCount();
+      if (!mounted) return;
+      setState(() => _unreadAlerts = count);
+    } catch (_) {
+      // keep the last known count on failure
+    }
+  }
 
   void _onTabTapped(int index) {
     if (index == 2) {
@@ -38,6 +70,8 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     setState(() => _currentIndex = index);
+    // Refresh the badge when switching tabs (e.g. after reading alerts)
+    _refreshUnread();
   }
 
   @override
@@ -79,7 +113,7 @@ class _HomeShellState extends State<HomeShell> {
                   icon: Icons.notifications_outlined,
                   activeIcon: Icons.notifications_rounded,
                   label: 'Alerts',
-                  badgeCount: 3,
+                  badgeCount: _unreadAlerts,
                 ),
                 _buildNavItem(
                   index: 4,

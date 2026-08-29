@@ -25,8 +25,10 @@ class ProximityService {
   bool _started = false;
   bool _notifInitialized = false;
 
-  // Hazard IDs we've already alerted the user about (this session)
-  final Set<int> _alertedHazardIDs = {};
+  // Hazard IDs the user is CURRENTLY within range of.
+  // We alert only when a hazard ENTERS this set (outside -> inside),
+  // not repeatedly while the user stays nearby. This prevents alert spam.
+  final Set<int> _hazardsInRange = {};
 
   // Latest known verified hazards (refreshed periodically by the map)
   List<Report> _hazards = [];
@@ -105,8 +107,6 @@ class ProximityService {
 
   void _onPosition(Position pos) {
     for (final h in _hazards) {
-      if (_alertedHazardIDs.contains(h.reportID)) continue;
-
       final meters = Geolocator.distanceBetween(
         pos.latitude,
         pos.longitude,
@@ -114,10 +114,18 @@ class ProximityService {
         h.longitude,
       );
 
-      if (meters <= proximityRadiusMeters) {
-        _alertedHazardIDs.add(h.reportID); // once per hazard
+      final inRangeNow = meters <= proximityRadiusMeters;
+      final wasInRange = _hazardsInRange.contains(h.reportID);
+
+      if (inRangeNow && !wasInRange) {
+        // ENTER: user just came within range — alert once
+        _hazardsInRange.add(h.reportID);
         _fireAlert(h, meters);
+      } else if (!inRangeNow && wasInRange) {
+        // EXIT: user left the area — re-arm so a future re-entry alerts again
+        _hazardsInRange.remove(h.reportID);
       }
+      // Still in range (or still out of range): do nothing — no repeat alert
     }
   }
 
@@ -148,10 +156,10 @@ class ProximityService {
     }
 
     // 2. Create a backend alert so it shows in the Alerts tab
+    //    (backend deduplicates — won't create if an unread one already exists)
     try {
-      await _alertService.createAlert(
+      await _alertService.createHazardAlert(
         hazardID: hazard.reportID,
-        type: 'hazard',
         title: title,
         message: message,
       );

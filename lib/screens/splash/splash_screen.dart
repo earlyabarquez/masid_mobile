@@ -42,7 +42,7 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _navigate() async {
-    await Future.delayed(const Duration(milliseconds: 2200));
+    await Future.delayed(const Duration(milliseconds: 5000));
     if (!mounted) return;
 
     final isLoggedIn = await TokenStorage.isLoggedIn();
@@ -79,26 +79,12 @@ class _SplashScreenState extends State<SplashScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // ── Logo placeholder (replace with Image.asset when ready) ──
-                Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    color: AppColors.primary,
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.primary.withValues(alpha: 0.3),
-                        blurRadius: 20,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.shield_outlined,
-                    color: Colors.white,
-                    size: 40,
-                  ),
+                // ── Logo ──
+                Image.asset(
+                  'assets/images/masid_logo.png',
+                  width: 250,
+                  height: 250,
+                  fit: BoxFit.contain,
                 ),
 
                 const SizedBox(height: 24),

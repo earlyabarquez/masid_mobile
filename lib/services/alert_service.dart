@@ -48,6 +48,17 @@ class AlertService {
     return user['userID'] as int?;
   }
 
+  // Count unread alerts for the logged-in user (for the nav badge)
+  Future<int> unreadCount() async {
+    final userID = await _currentUserID();
+    if (userID == null) return 0;
+    final res = await _dio.get(
+      '/api/alerts/unread',
+      queryParameters: {'userID': userID},
+    );
+    return (res.data as List).length;
+  }
+
   // Fetch all alerts for the logged-in user
   Future<List<AppAlert>> getMyAlerts() async {
     final userID = await _currentUserID();
@@ -72,10 +83,10 @@ class AlertService {
     await _dio.put('/api/alerts/read-all', queryParameters: {'userID': userID});
   }
 
-  // Create an alert (used for client-detected nearby-hazard alerts)
-  Future<void> createAlert({
+  // Create a hazard proximity alert (deduplicated on the backend — won't
+  // create a duplicate if an unread hazard alert for this hazard already exists)
+  Future<void> createHazardAlert({
     required int hazardID,
-    required String type,
     required String title,
     required String message,
   }) async {
@@ -83,11 +94,11 @@ class AlertService {
     if (userID == null) throw Exception('Not logged in');
 
     await _dio.post(
-      '/api/alerts',
+      '/api/alerts/hazard',
       data: {
         'userID': userID,
         'hazardID': hazardID,
-        'type': type,
+        'type': 'hazard',
         'title': title,
         'message': message,
         'isRead': false,
