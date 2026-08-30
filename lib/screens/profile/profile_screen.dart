@@ -1,9 +1,13 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import '../../utils/token_storage.dart';
+import '../../services/report_service.dart';
 import '../auth/login_screen.dart';
+import '../map/map_screen.dart'; // hazardIconFor
 import 'edit_profile_screen.dart';
+import 'change_password_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -13,28 +17,124 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  // Mock user data (replace with Provider/API later)
-  final String _firstName = 'Juan';
-  final String _middleInitial = 'S.';
-  final String _lastName = 'Dela Cruz';
-  final String _email = 'juan.delacruz@email.com';
-  final String _phone = '0917 123 4567';
+  final _reportService = ReportService();
 
-  // Mock stats
-  final int _totalReports = 24;
-  final int _verified = 18;
-  final int _rejected = 3;
-  final int _pending = 2;
-  final int _critical = 1;
-  final int _reportsThisMonth = 6;
-  final String _topHazard = 'Flood';
+  // Real user data (loaded from storage)
+  String _firstName = '';
+  String _middleInitial = '';
+  String _lastName = '';
+  String _email = '';
+  String _phone = '';
+  String _role = 'Resident';
+
+  // Real stats (computed from the user's reports)
+  int _totalReports = 0;
+  int _verified = 0;
+  int _rejected = 0;
+  int _pending = 0;
+  int _critical = 0;
+  int _reportsThisMonth = 0;
+  String _topHazard = '—';
+  bool _loadingStats = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUser();
+    _loadStats();
+  }
+
+  Future<void> _loadUser() async {
+    final userJson = await TokenStorage.getUser();
+    if (userJson == null) return;
+    final user = jsonDecode(userJson);
+    if (!mounted) return;
+    setState(() {
+      _firstName = user['firstName'] ?? '';
+      _middleInitial = user['middleInitial'] ?? '';
+      _lastName = user['lastName'] ?? '';
+      _email = user['email'] ?? '';
+      _phone = user['phone'] ?? '';
+      _role = user['role'] ?? user['position'] ?? 'Resident';
+    });
+  }
+
+  Future<void> _loadStats() async {
+    try {
+      final reports = await _reportService.getMyReports();
+      if (!mounted) return;
+
+      int verified = 0, rejected = 0, pending = 0, critical = 0, thisMonth = 0;
+      final now = DateTime.now();
+      final hazardCounts = <String, int>{};
+
+      for (final r in reports) {
+        switch (r.statusName) {
+          case 'Verified':
+            verified++;
+            break;
+          case 'Rejected':
+            rejected++;
+            break;
+          case 'Critical':
+            critical++;
+            break;
+          case 'Pending':
+            pending++;
+            break;
+        }
+        // This month
+        if (r.reportDate != null) {
+          try {
+            final d = DateTime.parse(r.reportDate!);
+            if (d.year == now.year && d.month == now.month) thisMonth++;
+          } catch (_) {}
+        }
+        // Top hazard tally
+        hazardCounts[r.hazardName] = (hazardCounts[r.hazardName] ?? 0) + 1;
+      }
+
+      String top = '—';
+      int topN = 0;
+      hazardCounts.forEach((k, v) {
+        if (v > topN) {
+          topN = v;
+          top = k;
+        }
+      });
+
+      setState(() {
+        _totalReports = reports.length;
+        _verified = verified;
+        _rejected = rejected;
+        _pending = pending;
+        _critical = critical;
+        _reportsThisMonth = thisMonth;
+        _topHazard = top;
+        _loadingStats = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loadingStats = false);
+    }
+  }
 
   double get _accuracyRate {
     if (_totalReports == 0) return 0;
     return (_verified / _totalReports) * 100;
   }
 
-  String get _fullName => '$_firstName $_middleInitial $_lastName';
+  String get _fullName {
+    final mid = _middleInitial.isNotEmpty ? ' $_middleInitial' : '';
+    return '$_firstName$mid $_lastName'.trim();
+  }
+
+  String get _initials {
+    final f = _firstName.isNotEmpty ? _firstName[0] : '';
+    final l = _lastName.isNotEmpty ? _lastName[0] : '';
+    final res = '$f$l'.toUpperCase();
+    return res.isEmpty ? '?' : res;
+  }
 
   Future<void> _handleLogout() async {
     final confirmed = await showDialog<bool>(
@@ -104,25 +204,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-          child: Column(
-            children: [
-              // ── Profile header card ──
-              _buildProfileCard(),
-              const SizedBox(height: 16),
-
-              // ── Stats grid ──
-              _buildStatsGrid(),
-              const SizedBox(height: 12),
-
-              // ── Extra stats ──
-              _buildExtraStats(),
-              const SizedBox(height: 16),
-
-              // ── Settings list ──
-              _buildSettingsList(),
-            ],
+        child: RefreshIndicator(
+          onRefresh: () async {
+            await _loadUser();
+            await _loadStats();
+          },
+          color: AppColors.primary,
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+            child: Column(
+              children: [
+                _buildProfileCard(),
+                const SizedBox(height: 16),
+                _buildStatsGrid(),
+                const SizedBox(height: 12),
+                _buildExtraStats(),
+                const SizedBox(height: 16),
+                _buildSettingsList(),
+              ],
+            ),
           ),
         ),
       ),
@@ -158,7 +259,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                     child: Center(
                       child: Text(
-                        '${_firstName[0]}${_lastName[0]}',
+                        _initials,
                         style: const TextStyle(
                           fontFamily: 'Sora',
                           fontSize: 22,
@@ -196,7 +297,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      _fullName,
+                      _fullName.isEmpty ? 'Loading...' : _fullName,
                       style: const TextStyle(
                         fontFamily: 'Sora',
                         fontSize: 17,
@@ -215,9 +316,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         borderRadius: BorderRadius.circular(100),
                         border: Border.all(color: AppColors.primaryBorder),
                       ),
-                      child: const Text(
-                        'MDRRMO RESPONDER',
-                        style: TextStyle(
+                      child: Text(
+                        _role.toUpperCase(),
+                        style: const TextStyle(
                           fontFamily: 'Sora',
                           fontSize: 9,
                           fontWeight: FontWeight.w700,
@@ -232,10 +333,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
               // Edit button
               GestureDetector(
-                onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const EditProfileScreen()),
-                ),
+                onTap: () async {
+                  final updated = await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const EditProfileScreen(),
+                    ),
+                  );
+                  if (updated == true) _loadUser();
+                },
                 child: Container(
                   width: 38,
                   height: 38,
@@ -267,15 +373,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 color: AppColors.label,
               ),
               const SizedBox(width: 8),
-              Text(
-                _email,
-                style: const TextStyle(
-                  fontFamily: 'Sora',
-                  fontSize: 12,
-                  color: AppColors.muted,
+              Expanded(
+                child: Text(
+                  _email.isEmpty ? '—' : _email,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: 'Sora',
+                    fontSize: 12,
+                    color: AppColors.muted,
+                  ),
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               const Icon(
                 Icons.phone_outlined,
                 size: 16,
@@ -283,7 +392,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
               const SizedBox(width: 8),
               Text(
-                _phone,
+                _phone.isEmpty ? '—' : _phone,
                 style: const TextStyle(
                   fontFamily: 'Sora',
                   fontSize: 12,
@@ -301,7 +410,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Widget _buildStatsGrid() {
     return Column(
       children: [
-        // Top row
         Row(
           children: [
             _buildStatCard(
@@ -331,7 +439,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ],
         ),
         const SizedBox(height: 10),
-        // Bottom row
         Row(
           children: [
             _buildStatCard(
@@ -380,7 +487,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Icon(icon, size: 18, color: color),
             const SizedBox(height: 10),
             Text(
-              value,
+              _loadingStats ? '—' : value,
               style: TextStyle(
                 fontFamily: 'Sora',
                 fontSize: 20,
@@ -474,8 +581,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     color: AppColors.error.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(
-                    Icons.water_rounded,
+                  child: Icon(
+                    _topHazard == '—'
+                        ? Icons.help_outline_rounded
+                        : hazardIconFor(_topHazard),
                     size: 18,
                     color: AppColors.error,
                   ),
@@ -524,32 +633,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
           _buildSettingsItem(
             icon: Icons.person_outline_rounded,
             label: 'Edit Profile',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const EditProfileScreen()),
-            ),
+            onTap: () async {
+              final updated = await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const EditProfileScreen()),
+              );
+              if (updated == true) _loadUser();
+            },
           ),
           const Divider(height: 1, indent: 52),
           _buildSettingsItem(
             icon: Icons.lock_outline_rounded,
             label: 'Change Password',
-            onTap: () {
-              // TODO: Navigate to change password screen
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Change password — coming soon',
-                    style: TextStyle(fontFamily: 'Sora'),
-                  ),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),
+            ),
           ),
           const Divider(height: 1, indent: 52),
           _buildSettingsItem(
             icon: Icons.info_outline_rounded,
-            label: 'About M.A.S.I.D',
+            label: 'About ${AppConstants.appName}',
             onTap: () {
               showDialog(
                 context: context,
