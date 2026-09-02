@@ -4,5 +4,9 @@ class ApiConfig {
   // static const String baseUrl = "http://localhost:8080";
 
   // Switch to this base url if you switching to mobile
+  // Resto config
   static const String baseUrl = "http://192.168.100.10:8080";
+
+  // Faculty config
+  // static const String baseUrl = "http://192.168.56.1:8080";
 }
