@@ -3,7 +3,6 @@ import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import 'register_screen.dart';
 import '../home/home_shell.dart';
-import '../../utils/token_storage.dart';
 import '../../services/auth_service.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -72,18 +71,11 @@ class _LoginScreenState extends State<LoginScreen> {
               Center(
                 child: Column(
                   children: [
-                    Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        color: AppColors.primary,
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: const Icon(
-                        Icons.shield_outlined,
-                        color: Colors.white,
-                        size: 28,
-                      ),
+                    Image.asset(
+                      'assets/images/masid_logo.png',
+                      width: 72,
+                      height: 72,
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(height: 12),
                     const Text(
