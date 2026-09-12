@@ -17,7 +17,6 @@ class ProximityService {
   static const double proximityRadiusMeters = 100.0;
   static const int _distanceFilterMeters = 15; // update when user moves ~15m
 
-  final _reportService = ReportService();
   final _alertService = AlertService();
   final _notifications = FlutterLocalNotificationsPlugin();
 

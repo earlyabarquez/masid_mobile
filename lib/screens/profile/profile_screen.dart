@@ -8,6 +8,7 @@ import '../auth/login_screen.dart';
 import '../map/map_screen.dart'; // hazardIconFor
 import 'edit_profile_screen.dart';
 import 'change_password_screen.dart';
+import '../hotlines/hotlines_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -648,6 +649,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const ChangePasswordScreen()),
+            ),
+          ),
+          const Divider(height: 1, indent: 52),
+          _buildSettingsItem(
+            icon: Icons.emergency_rounded,
+            label: 'Emergency Hotlines',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const HotlinesScreen()),
             ),
           ),
           const Divider(height: 1, indent: 52),

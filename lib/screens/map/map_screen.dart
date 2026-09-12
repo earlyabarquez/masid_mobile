@@ -8,6 +8,7 @@ import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import '../../services/report_service.dart';
 import '../../services/proximity_service.dart';
+import '../../services/establishment_service.dart';
 import '../../widgets/pulsing_marker.dart';
 import 'hazard_detail_sheet.dart';
 
@@ -77,13 +78,63 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
+// ── Establishment icon by type (matches the admin map) ──
+IconData establishmentIconFor(String type) {
+  switch (type) {
+    case 'School':
+      return Icons.school_rounded;
+    case 'Health Facility':
+      return Icons.local_hospital_rounded;
+    case 'Government Hall':
+      return Icons.account_balance_rounded;
+    case 'Place of Worship':
+      return Icons.church_rounded;
+    case 'Social Facility':
+      return Icons.groups_rounded;
+    case 'Market':
+      return Icons.storefront_rounded;
+    case 'Evacuation Center':
+      return Icons.safety_divider_rounded;
+    case 'Library':
+      return Icons.menu_book_rounded;
+    case 'Childcare':
+      return Icons.child_care_rounded;
+    default:
+      return Icons.place_rounded;
+  }
+}
+
+Color establishmentColorFor(String category) {
+  switch (category) {
+    case 'Education':
+      return const Color(0xFF2563EB);
+    case 'Health':
+      return const Color(0xFFDC2626);
+    case 'Government':
+      return const Color(0xFF475569);
+    case 'Community':
+      return const Color(0xFF7C3AED);
+    case 'Commercial':
+      return const Color(0xFFD97706);
+    case 'Emergency':
+      return const Color(0xFF0891B2);
+    case 'Public':
+      return const Color(0xFF92400E);
+    default:
+      return const Color(0xFF64748B);
+  }
+}
+
 class _MapScreenState extends State<MapScreen> {
   final MapController _mapController = MapController();
   final _reportService = ReportService();
+  final _establishmentService = EstablishmentService();
 
   Timer? _refreshTimer;
   bool _isSatellite = false;
   bool _showLegend = true;
+  bool _showEstablishments = false;
+  List<Establishment> _establishments = [];
 
   List<Report> _reports = [];
   bool _loading = true;
@@ -105,6 +156,7 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     _loadReports();
+    _loadEstablishments();
     _initLocation();
     // Auto-refresh every 30 seconds so newly verified reports appear
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -151,6 +203,79 @@ class _MapScreenState extends State<MapScreen> {
 
   // Fetch verified reports from the backend (same as the admin risk map).
   // silent = true skips the loading indicator (used by auto-refresh).
+  // Show a small sheet with the establishment's name + type when tapped.
+  void _onEstablishmentTapped(Establishment e) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        margin: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: establishmentColorFor(
+                  e.category,
+                ).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                establishmentIconFor(e.type),
+                color: establishmentColorFor(e.category),
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    e.name,
+                    style: const TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.heading,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    e.type,
+                    style: const TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 12,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Fetch establishments once (schools, health, churches, halls, etc.)
+  Future<void> _loadEstablishments() async {
+    try {
+      final list = await _establishmentService.getEstablishments();
+      if (!mounted) return;
+      setState(() => _establishments = list);
+    } catch (_) {
+      // non-fatal; establishments just won't show
+    }
+  }
+
   Future<void> _loadReports({bool silent = false}) async {
     try {
       final reports = await _reportService.getVerifiedReports();
@@ -224,6 +349,43 @@ class _MapScreenState extends State<MapScreen> {
                               : _osmTileUrl,
                           userAgentPackageName: 'com.balilihan.masid',
                         ),
+
+                        // Establishment markers (schools, churches, health, etc.)
+                        if (_showEstablishments)
+                          MarkerLayer(
+                            markers: _establishments.map((e) {
+                              return Marker(
+                                point: LatLng(e.latitude, e.longitude),
+                                width: 30,
+                                height: 30,
+                                child: GestureDetector(
+                                  onTap: () => _onEstablishmentTapped(e),
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      color: establishmentColorFor(e.category),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: Colors.white,
+                                        width: 2,
+                                      ),
+                                      boxShadow: const [
+                                        BoxShadow(
+                                          color: Color(0x40000000),
+                                          blurRadius: 4,
+                                          offset: Offset(0, 1),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Icon(
+                                      establishmentIconFor(e.type),
+                                      size: 15,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
 
                         // Hazard markers (real data)
                         MarkerLayer(
@@ -340,6 +502,44 @@ class _MapScreenState extends State<MapScreen> {
                       Icons.satellite_alt_rounded,
                       size: 20,
                       color: _isSatellite ? Colors.white : AppColors.secondary,
+                    ),
+                  ),
+                ),
+
+                const SizedBox(width: 10),
+
+                // Establishments toggle
+                GestureDetector(
+                  onTap: () => setState(
+                    () => _showEstablishments = !_showEstablishments,
+                  ),
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: _showEstablishments
+                          ? AppColors.primary
+                          : AppColors.surface,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: _showEstablishments
+                            ? AppColors.primary
+                            : AppColors.border,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x12000000),
+                          blurRadius: 8,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      Icons.storefront_rounded,
+                      size: 20,
+                      color: _showEstablishments
+                          ? Colors.white
+                          : AppColors.secondary,
                     ),
                   ),
                 ),
