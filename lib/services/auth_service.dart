@@ -50,7 +50,9 @@ class AuthService {
     required String password,
     required String firstName,
     required String lastName,
-    String? position,
+    String? middleInitial,
+    String? phone,
+    int? brgyID,
   }) async {
     try {
       final res = await _dio.post(
@@ -60,9 +62,12 @@ class AuthService {
           'email': email,
           'password': password,
           'firstName': firstName,
+          'middleInitial': middleInitial ?? '',
           'lastName': lastName,
-          'position': position ?? 'Responder',
-          'roleID': 2, // 2 = Responder
+          'phone': phone ?? '',
+          'position': 'Resident',
+          'roleID': 3, // 3 = Resident (mobile self-registration)
+          'brgyID': brgyID,
         },
       );
 

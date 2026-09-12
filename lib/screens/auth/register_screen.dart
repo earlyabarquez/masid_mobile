@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
 import '../../utils/token_storage.dart';
 import '../home/home_shell.dart';
+import '../../services/auth_service.dart';
+import '../../services/barangay_service.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -22,6 +24,28 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _obscurePass = true;
   bool _obscureConfirm = true;
   bool _loading = false;
+
+  final _authService = AuthService();
+  final _barangayService = BarangayService();
+  List<Barangay> _barangays = [];
+  int? _selectedBrgyID;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBarangays();
+  }
+
+  Future<void> _loadBarangays() async {
+    try {
+      final list = await _barangayService.getBarangays();
+      debugPrint('[Register] Loaded ${list.length} barangays');
+      if (!mounted) return;
+      setState(() => _barangays = list);
+    } catch (e) {
+      debugPrint('[Register] Failed to load barangays: $e');
+    }
+  }
 
   @override
   void dispose() {
@@ -45,35 +69,49 @@ class _RegisterScreenState extends State<RegisterScreen> {
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
 
+    // Require a barangay
+    if (_selectedBrgyID == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select your barangay')),
+      );
+      return;
+    }
+
     setState(() => _loading = true);
 
-    // Build payload
-    final payload = {
-      'firstName': _firstNameCtrl.text.trim(),
-      'middleInitial': _middleInitial(),
-      'lastName': _lastNameCtrl.text.trim(),
-      'phone': _phoneCtrl.text.trim(),
-      'email': _emailCtrl.text.trim(),
-      'password': _passCtrl.text,
-    };
+    // Auto-generate a username from the email (part before the @).
+    final email = _emailCtrl.text.trim();
+    final username = email.contains('@') ? email.split('@').first : email;
 
-    // TODO: Replace with actual Spring Boot API call
-    // final response = await ApiService.post('/auth/register', payload);
-    await Future.delayed(const Duration(seconds: 1));
-
-    debugPrint('Register payload: $payload');
-
-    // Simulate saving token after registration
-    await TokenStorage.saveToken('temp_jwt_token');
+    final result = await _authService.register(
+      username: username,
+      email: email,
+      password: _passCtrl.text,
+      firstName: _firstNameCtrl.text.trim(),
+      middleInitial: _middleInitial(),
+      lastName: _lastNameCtrl.text.trim(),
+      phone: _phoneCtrl.text.trim(),
+      brgyID: _selectedBrgyID,
+    );
 
     if (!mounted) return;
     setState(() => _loading = false);
 
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => const HomeShell()),
-      (_) => false,
-    );
+    if (result.success) {
+      // Registration logs the resident in (token saved by the service).
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeShell()),
+        (_) => false,
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result.error ?? 'Registration failed'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   @override
@@ -121,7 +159,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 6),
               const Text(
-                'Register as an MDRRMO responder',
+                'Create your resident account to report hazards',
                 style: TextStyle(
                   fontFamily: 'Sora',
                   fontSize: 14,
@@ -139,6 +177,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   children: [
                     // ── Name row ──
                     Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         // First name
                         Expanded(
@@ -190,6 +229,53 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         if (v.trim().length < 11) return 'Enter a valid number';
                         return null;
                       },
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Barangay (resident's home barangay)
+                    const Text(
+                      'Barangay',
+                      style: TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.body,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<int>(
+                      value: _selectedBrgyID,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(
+                          Icons.location_city_rounded,
+                          size: 20,
+                          color: AppColors.label,
+                        ),
+                        hintText: 'Select your barangay',
+                      ),
+                      hint: const Text(
+                        'Select your barangay',
+                        style: TextStyle(fontFamily: 'Sora', fontSize: 14),
+                      ),
+                      items: _barangays
+                          .map(
+                            (b) => DropdownMenuItem<int>(
+                              value: b.id,
+                              child: Text(
+                                b.name,
+                                style: const TextStyle(
+                                  fontFamily: 'Sora',
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (v) => setState(() => _selectedBrgyID = v),
+                      validator: (v) =>
+                          v == null ? 'Please select your barangay' : null,
                     ),
 
                     const SizedBox(height: 16),
