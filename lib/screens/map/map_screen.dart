@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
@@ -316,6 +317,126 @@ class _MapScreenState extends State<MapScreen> {
 
   void _centerOnUser() {
     _mapController.move(_userLocation, 15.0);
+  }
+
+  // Find the nearest establishment flagged as an evacuation center, then
+  // open directions to it in the device's maps app.
+  Future<void> _goToNearestEvacuation() async {
+    final evacs = _establishments.where((e) => e.isEvacuationCenter).toList();
+    if (evacs.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No evacuation centers available')),
+      );
+      return;
+    }
+
+    // Distance (Haversine) from the user to each evac center; pick the closest.
+    const distance = Distance();
+    Establishment? nearest;
+    double best = double.infinity;
+    for (final e in evacs) {
+      final d = distance.as(
+        LengthUnit.Meter,
+        _userLocation,
+        LatLng(e.latitude, e.longitude),
+      );
+      if (d < best) {
+        best = d;
+        nearest = e;
+      }
+    }
+    if (nearest == null) return;
+
+    // Show a quick sheet, then open directions.
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        margin: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: AppColors.success.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.safety_divider_rounded,
+                    color: AppColors.success,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        nearest!.name,
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.heading,
+                        ),
+                      ),
+                      Text(
+                        '${nearest.evacType ?? "Evacuation"} Center · ${(best / 1000).toStringAsFixed(2)} km away',
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          color: AppColors.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _openDirections(nearest!.latitude, nearest.longitude);
+                },
+                icon: const Icon(Icons.directions_rounded, size: 18),
+                label: const Text('Get Directions'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Open the maps app with directions to a coordinate.
+  Future<void> _openDirections(double lat, double lng) async {
+    final uri = Uri.parse(
+      'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng',
+    );
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } else if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Could not open maps')));
+    }
   }
 
   @override
@@ -719,6 +840,51 @@ class _MapScreenState extends State<MapScreen> {
                     _legendRow(const Color(0xFFF59E0B), 'Moderate / 3'),
                     _legendRow(const Color(0xFF2563EB), 'Low / 2'),
                     _legendRow(const Color(0xFF16A34A), 'Minimal / 1'),
+                    // ── Nearest Evacuation Center button (bottom) ──
+                    Positioned(
+                      left: 16,
+                      right: 16,
+                      bottom: 20,
+                      child: SafeArea(
+                        child: GestureDetector(
+                          onTap: _goToNearestEvacuation,
+                          child: Container(
+                            height: 52,
+                            decoration: BoxDecoration(
+                              color: AppColors.success,
+                              borderRadius: BorderRadius.circular(14),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x33000000),
+                                  blurRadius: 12,
+                                  offset: Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.safety_divider_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Nearest Evacuation Center',
+                                  style: TextStyle(
+                                    fontFamily: 'Sora',
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),

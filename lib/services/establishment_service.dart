@@ -8,6 +8,8 @@ class Establishment {
   final String category;
   final double latitude;
   final double longitude;
+  final bool isEvacuationCenter;
+  final String? evacType;
 
   Establishment({
     required this.establishmentID,
@@ -16,6 +18,8 @@ class Establishment {
     required this.category,
     required this.latitude,
     required this.longitude,
+    this.isEvacuationCenter = false,
+    this.evacType,
   });
 
   factory Establishment.fromJson(Map<String, dynamic> json) {
@@ -26,6 +30,10 @@ class Establishment {
       category: json['category'] ?? 'Other',
       latitude: (json['latitude'] as num?)?.toDouble() ?? 0.0,
       longitude: (json['longitude'] as num?)?.toDouble() ?? 0.0,
+      // Jackson serializes boolean isEvacuationCenter as "evacuationCenter".
+      isEvacuationCenter:
+          json['evacuationCenter'] ?? json['isEvacuationCenter'] ?? false,
+      evacType: json['evacType'],
     );
   }
 }
