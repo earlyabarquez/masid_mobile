@@ -147,6 +147,7 @@ class _MapScreenState extends State<MapScreen> {
     AppConstants.defaultLng,
   );
   bool _hasRealLocation = false;
+  final Dio _dio = Dio(); // plain client for the external OSRM routing API
 
   static const String _osmTileUrl =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
@@ -165,35 +166,105 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
-  // Get the user's real location for the map dot + start proximity watching
-  Future<void> _initLocation() async {
-    try {
-      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) return;
+  bool _locating = false;
 
+  // Get the user's real location for the map dot + start proximity watching.
+  // `moveMap` centers the map on the user once found.
+  Future<void> _initLocation({
+    bool moveMap = false,
+    bool showFeedback = false,
+  }) async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    try {
+      // 1. Location services on?
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (showFeedback && mounted) {
+          _snack(
+            'Location is off. Please enable Location/GPS in your device settings.',
+          );
+          await Geolocator.openLocationSettings();
+        }
+        return;
+      }
+
+      // 2. Permission
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
+      if (permission == LocationPermission.deniedForever) {
+        if (showFeedback && mounted) {
+          _snack(
+            'Location permission is permanently denied. Enable it in app settings.',
+          );
+          await Geolocator.openAppSettings();
+        }
+        return;
+      }
+      if (permission == LocationPermission.denied) {
+        if (showFeedback && mounted) _snack('Location permission denied.');
         return;
       }
 
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
-      if (!mounted) return;
-      setState(() {
-        _userLocation = LatLng(pos.latitude, pos.longitude);
-        _hasRealLocation = true;
-      });
+      // 3. Get a position — try last-known first (instant), then a fresh fix
+      //    with a timeout so it can't hang forever.
+      Position? pos = await Geolocator.getLastKnownPosition();
+      if (pos != null && mounted) {
+        setState(() {
+          _userLocation = LatLng(pos!.latitude, pos.longitude);
+          _hasRealLocation = true;
+        });
+        if (moveMap) _mapController.move(_userLocation, 16);
+      }
+
+      // Fresh, accurate fix (may take a moment)
+      try {
+        pos = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 15),
+        );
+      } catch (_) {
+        // fall back to medium accuracy if high times out
+        try {
+          pos = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.medium,
+            timeLimit: const Duration(seconds: 10),
+          );
+        } catch (_) {
+          pos = pos; // keep last-known if both fail
+        }
+      }
+
+      if (pos != null && mounted) {
+        setState(() {
+          _userLocation = LatLng(pos!.latitude, pos.longitude);
+          _hasRealLocation = true;
+        });
+        if (moveMap) _mapController.move(_userLocation, 16);
+      } else if (showFeedback && mounted && !_hasRealLocation) {
+        _snack('Could not get your location. Try again in an open area.');
+      }
 
       // Start proximity watching (foreground) — alerts on hazards within 100m
       await ProximityService.instance.start();
-    } catch (_) {
-      // keep the default center if location fails
+    } catch (e) {
+      if (showFeedback && mounted) _snack('Location error. Please try again.');
+    } finally {
+      if (mounted) setState(() => _locating = false);
     }
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  // Button handler: locate me + center the map on my position.
+  Future<void> _locateMe() async {
+    await _initLocation(moveMap: true, showFeedback: true);
   }
 
   @override
@@ -321,21 +392,36 @@ class _MapScreenState extends State<MapScreen> {
 
   // Find the nearest establishment flagged as an evacuation center, then
   // open directions to it in the device's maps app.
-  Future<void> _goToNearestEvacuation() async {
-    final evacs = _establishments.where((e) => e.isEvacuationCenter).toList();
-    if (evacs.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No evacuation centers available')),
+  // ── Nearest establishment routing (in-app, follows roads via OSRM) ──
+  List<LatLng> _routePoints = []; // the drawn route polyline
+  Establishment? _routeDest; // the destination establishment
+  double _routeDistanceM = 0; // route distance (metres)
+  bool _routing = false;
+
+  // Find the nearest establishment of a kind, then draw a road route to it.
+  //  kind: "evacuation" -> flagged evac centers; "medical" -> health facilities.
+  Future<void> _routeToNearest(String kind) async {
+    List<Establishment> pool;
+    if (kind == "evacuation") {
+      pool = _establishments.where((e) => e.isEvacuationCenter).toList();
+    } else {
+      pool = _establishments.where((e) => e.type == "Health Facility").toList();
+    }
+
+    if (pool.isEmpty) {
+      _snack(
+        kind == "evacuation"
+            ? 'No evacuation centers available'
+            : 'No medical centers available',
       );
       return;
     }
 
-    // Distance (Haversine) from the user to each evac center; pick the closest.
+    // Pick the closest by straight-line distance (fast pre-filter).
     const distance = Distance();
     Establishment? nearest;
     double best = double.infinity;
-    for (final e in evacs) {
+    for (final e in pool) {
       final d = distance.as(
         LengthUnit.Meter,
         _userLocation,
@@ -348,8 +434,95 @@ class _MapScreenState extends State<MapScreen> {
     }
     if (nearest == null) return;
 
-    // Show a quick sheet, then open directions.
-    if (!mounted) return;
+    setState(() => _routing = true);
+    try {
+      // Ask OSRM for the road route from the user to the destination.
+      final route = await _fetchRoute(
+        _userLocation,
+        LatLng(nearest.latitude, nearest.longitude),
+      );
+      if (!mounted) return;
+      setState(() {
+        _routeDest = nearest;
+        _routePoints = route.$1.isNotEmpty
+            ? route.$1
+            : [
+                _userLocation,
+                LatLng(nearest!.latitude, nearest.longitude),
+              ]; // fallback: straight line
+        _routeDistanceM = route.$2 > 0 ? route.$2 : best;
+      });
+
+      // Fit the map to show the whole route.
+      _fitRoute();
+
+      // Show a small info card.
+      _showRouteCard(kind);
+    } catch (e) {
+      if (!mounted) return;
+      // Fallback: straight line if routing fails.
+      setState(() {
+        _routeDest = nearest;
+        _routePoints = [
+          _userLocation,
+          LatLng(nearest!.latitude, nearest.longitude),
+        ];
+        _routeDistanceM = best;
+      });
+      _fitRoute();
+      _showRouteCard(kind);
+    } finally {
+      if (mounted) setState(() => _routing = false);
+    }
+  }
+
+  // Call the free OSRM public API for a driving route.
+  // Returns (list of points, distance in metres).
+  Future<(List<LatLng>, double)> _fetchRoute(LatLng from, LatLng to) async {
+    final url =
+        'https://router.project-osrm.org/route/v1/driving/'
+        '${from.longitude},${from.latitude};${to.longitude},${to.latitude}'
+        '?overview=full&geometries=geojson';
+    final res = await _dio.getUri(Uri.parse(url));
+    final data = res.data;
+    final routes = data['routes'] as List?;
+    if (routes == null || routes.isEmpty) return (<LatLng>[], 0.0);
+    final route = routes[0];
+    final dist = (route['distance'] as num?)?.toDouble() ?? 0.0;
+    final coords = route['geometry']['coordinates'] as List;
+    final pts = coords
+        .map((p) => LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()))
+        .toList();
+    return (pts, dist);
+  }
+
+  void _fitRoute() {
+    if (_routePoints.length < 2) return;
+    double minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+    for (final p in _routePoints) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    final bounds = LatLngBounds(LatLng(minLat, minLng), LatLng(maxLat, maxLng));
+    _mapController.fitCamera(
+      CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(60)),
+    );
+  }
+
+  void _clearRoute() {
+    setState(() {
+      _routePoints = [];
+      _routeDest = null;
+      _routeDistanceM = 0;
+    });
+  }
+
+  void _showRouteCard(String kind) {
+    final dest = _routeDest;
+    if (dest == null) return;
+    final isEvac = kind == "evacuation";
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -360,63 +533,48 @@ class _MapScreenState extends State<MapScreen> {
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(16),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           children: [
-            Row(
-              children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: AppColors.success.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.safety_divider_rounded,
-                    color: AppColors.success,
-                    size: 24,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        nearest!.name,
-                        style: const TextStyle(
-                          fontFamily: 'Sora',
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.heading,
-                        ),
-                      ),
-                      Text(
-                        '${nearest.evacType ?? "Evacuation"} Center · ${(best / 1000).toStringAsFixed(2)} km away',
-                        style: const TextStyle(
-                          fontFamily: 'Sora',
-                          fontSize: 12,
-                          color: AppColors.muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+            Container(
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(
+                color: (isEvac ? AppColors.success : AppColors.error)
+                    .withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(
+                isEvac
+                    ? Icons.safety_divider_rounded
+                    : Icons.local_hospital_rounded,
+                color: isEvac ? AppColors.success : AppColors.error,
+                size: 24,
+              ),
             ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () {
-                  Navigator.pop(context);
-                  _openDirections(nearest!.latitude, nearest.longitude);
-                },
-                icon: const Icon(Icons.directions_rounded, size: 18),
-                label: const Text('Get Directions'),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    dest.name,
+                    style: const TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.heading,
+                    ),
+                  ),
+                  Text(
+                    '${isEvac ? (dest.evacType ?? "Evacuation") + " Evacuation Center" : "Medical Center"} · ${(_routeDistanceM / 1000).toStringAsFixed(2)} km',
+                    style: const TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 12,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -425,18 +583,100 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // Open the maps app with directions to a coordinate.
-  Future<void> _openDirections(double lat, double lng) async {
-    final uri = Uri.parse(
-      'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng',
+  // Bottom sheet: choose Evacuation or Medical.
+  void _openNearestChooser() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        margin: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12, top: 2),
+              child: Text(
+                'Find the nearest…',
+                style: TextStyle(
+                  fontFamily: 'Sora',
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.heading,
+                ),
+              ),
+            ),
+            _chooserTile(
+              icon: Icons.safety_divider_rounded,
+              color: AppColors.success,
+              label: 'Evacuation Center',
+              onTap: () {
+                Navigator.pop(context);
+                _routeToNearest("evacuation");
+              },
+            ),
+            const SizedBox(height: 8),
+            _chooserTile(
+              icon: Icons.local_hospital_rounded,
+              color: AppColors.error,
+              label: 'Medical Center',
+              onTap: () {
+                Navigator.pop(context);
+                _routeToNearest("medical");
+              },
+            ),
+          ],
+        ),
+      ),
     );
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } else if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Could not open maps')));
-    }
+  }
+
+  Widget _chooserTile({
+    required IconData icon,
+    required Color color,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: color, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              label,
+              style: const TextStyle(
+                fontFamily: 'Sora',
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: AppColors.heading,
+              ),
+            ),
+            const Spacer(),
+            const Icon(Icons.chevron_right_rounded, color: AppColors.muted),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -506,6 +746,44 @@ class _MapScreenState extends State<MapScreen> {
                                 ),
                               );
                             }).toList(),
+                          ),
+
+                        // Route polyline (to nearest evacuation / medical)
+                        if (_routePoints.length >= 2)
+                          PolylineLayer(
+                            polylines: [
+                              Polyline(
+                                points: _routePoints,
+                                strokeWidth: 5,
+                                color: AppColors.primary,
+                                borderStrokeWidth: 2,
+                                borderColor: Colors.white,
+                              ),
+                            ],
+                          ),
+
+                        // Destination marker for the route
+                        if (_routeDest != null)
+                          MarkerLayer(
+                            markers: [
+                              Marker(
+                                point: LatLng(
+                                  _routeDest!.latitude,
+                                  _routeDest!.longitude,
+                                ),
+                                width: 40,
+                                height: 40,
+                                child: Icon(
+                                  _routeDest!.isEvacuationCenter
+                                      ? Icons.safety_divider_rounded
+                                      : Icons.local_hospital_rounded,
+                                  color: _routeDest!.isEvacuationCenter
+                                      ? AppColors.success
+                                      : AppColors.error,
+                                  size: 34,
+                                ),
+                              ),
+                            ],
                           ),
 
                         // Hazard markers (real data)
@@ -665,6 +943,44 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
               ],
+            ),
+          ),
+
+          // ── Locate me button (right side, above the evac button) ──
+          Positioned(
+            right: 16,
+            bottom: 88,
+            child: GestureDetector(
+              onTap: _locateMe,
+              child: Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(23),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F000000),
+                      blurRadius: 10,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: _locating
+                    ? const Padding(
+                        padding: EdgeInsets.all(13),
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Icon(
+                        _hasRealLocation
+                            ? Icons.my_location_rounded
+                            : Icons.location_searching_rounded,
+                        color: _hasRealLocation
+                            ? AppColors.primary
+                            : AppColors.secondary,
+                        size: 22,
+                      ),
+              ),
             ),
           ),
 
@@ -840,55 +1156,92 @@ class _MapScreenState extends State<MapScreen> {
                     _legendRow(const Color(0xFFF59E0B), 'Moderate / 3'),
                     _legendRow(const Color(0xFF2563EB), 'Low / 2'),
                     _legendRow(const Color(0xFF16A34A), 'Minimal / 1'),
-                    // ── Nearest Evacuation Center button (bottom) ──
-                    Positioned(
-                      left: 16,
-                      right: 16,
-                      bottom: 20,
-                      child: SafeArea(
-                        child: GestureDetector(
-                          onTap: _goToNearestEvacuation,
-                          child: Container(
-                            height: 52,
-                            decoration: BoxDecoration(
-                              color: AppColors.success,
-                              borderRadius: BorderRadius.circular(14),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Color(0x33000000),
-                                  blurRadius: 12,
-                                  offset: Offset(0, 4),
-                                ),
-                              ],
-                            ),
-                            child: const Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  Icons.safety_divider_rounded,
-                                  color: Colors.white,
-                                  size: 20,
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Nearest Evacuation Center',
-                                  style: TextStyle(
-                                    fontFamily: 'Sora',
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
             ),
+          // ── Find Nearest button (Evacuation / Medical) — bottom, own position ──
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 20,
+            child: SafeArea(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: _routing ? null : _openNearestChooser,
+                      child: Container(
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: AppColors.primary,
+                          borderRadius: BorderRadius.circular(14),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x33000000),
+                              blurRadius: 12,
+                              offset: Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Center(
+                          child: _routing
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.near_me_rounded,
+                                      color: Colors.white,
+                                      size: 20,
+                                    ),
+                                    SizedBox(width: 8),
+                                    Text(
+                                      'Find Nearest Center',
+                                      style: TextStyle(
+                                        fontFamily: 'Sora',
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_routePoints.isNotEmpty) ...[
+                    const SizedBox(width: 10),
+                    GestureDetector(
+                      onTap: _clearRoute,
+                      child: Container(
+                        width: 52,
+                        height: 52,
+                        decoration: BoxDecoration(
+                          color: AppColors.surface,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: const Icon(
+                          Icons.close_rounded,
+                          color: AppColors.secondary,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
