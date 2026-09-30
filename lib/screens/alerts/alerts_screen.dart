@@ -23,7 +23,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   void initState() {
     super.initState();
     _loadAlerts();
-    // Auto-refresh every 15s so new alerts appear
+    // Auto-refresh every 30s so new alerts appear
     _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _loadAlerts(silent: true);
     });
@@ -266,6 +266,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
 
   // Icon + color per alert
   IconData _alertIcon(AppAlert a) {
+    if (a.type == 'critical') return Icons.crisis_alert_rounded;
     if (a.type == 'statusUpdate') {
       if (a.title.contains('Verified')) return Icons.check_circle_rounded;
       if (a.title.contains('Rejected')) return Icons.cancel_rounded;
@@ -277,6 +278,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   }
 
   Color _alertColor(AppAlert a) {
+    if (a.type == 'critical') return AppColors.error;
     if (a.type == 'statusUpdate') {
       if (a.title.contains('Verified')) return AppColors.success;
       if (a.title.contains('Rejected')) return AppColors.error;
@@ -304,6 +306,7 @@ class _AlertsScreenState extends State<AlertsScreen> {
   Widget _buildAlertCard(AppAlert alert) {
     final color = _alertColor(alert);
     final isHazard = alert.type == 'hazard';
+    final isCritical = alert.type == 'critical';
 
     return GestureDetector(
       onTap: () => _markAsRead(alert),
@@ -389,12 +392,14 @@ class _AlertsScreenState extends State<AlertsScreen> {
                                     borderRadius: BorderRadius.circular(100),
                                   ),
                                   child: Text(
-                                    isHazard ? 'HAZARD' : 'UPDATE',
+                                    isCritical
+                                        ? 'CRITICAL'
+                                        : (isHazard ? 'HAZARD' : 'UPDATE'),
                                     style: TextStyle(
                                       fontFamily: 'Sora',
                                       fontSize: 9,
                                       fontWeight: FontWeight.w700,
-                                      color: isHazard
+                                      color: (isHazard || isCritical)
                                           ? AppColors.error
                                           : AppColors.primary,
                                       letterSpacing: 0.5,

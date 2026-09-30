@@ -132,6 +132,9 @@ class _MapScreenState extends State<MapScreen> {
   final _establishmentService = EstablishmentService();
 
   Timer? _refreshTimer;
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
+  String _query = '';
   bool _isSatellite = false;
   bool _showLegend = true;
   bool _showEstablishments = false;
@@ -270,7 +273,112 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
+  }
+
+  // ── Search ──
+  void _clearSearch() {
+    _searchController.clear();
+    _searchFocus.unfocus();
+    setState(() => _query = '');
+  }
+
+  void _selectHazardResult(Report r) {
+    _clearSearch();
+    _mapController.move(LatLng(r.latitude, r.longitude), 17);
+    _onHazardTapped(r);
+  }
+
+  void _selectPlaceResult(Establishment e) {
+    _clearSearch();
+    setState(() => _showEstablishments = true);
+    _mapController.move(LatLng(e.latitude, e.longitude), 17);
+    _onEstablishmentTapped(e);
+  }
+
+  Widget _buildSearchResults() {
+    final q = _query.trim().toLowerCase();
+    final hazards = _reports
+        .where(
+          (r) =>
+              r.hazardName.toLowerCase().contains(q) ||
+              r.statusName.toLowerCase().contains(q),
+        )
+        .take(6)
+        .toList();
+    final places = _establishments
+        .where(
+          (e) =>
+              e.name.toLowerCase().contains(q) ||
+              e.type.toLowerCase().contains(q) ||
+              e.category.toLowerCase().contains(q),
+        )
+        .take(6)
+        .toList();
+
+    const titleStyle = TextStyle(
+      fontFamily: 'Sora',
+      fontSize: 13,
+      fontWeight: FontWeight.w600,
+      color: AppColors.heading,
+    );
+    const subStyle = TextStyle(
+      fontFamily: 'Sora',
+      fontSize: 11,
+      color: AppColors.label,
+    );
+
+    final tiles = <Widget>[
+      for (final r in hazards)
+        ListTile(
+          dense: true,
+          leading: Icon(
+            hazardIconFor(r.hazardName),
+            color: severityColor(r.severity, r.statusName),
+          ),
+          title: Text(r.hazardName, style: titleStyle),
+          subtitle: Text(r.statusName, style: subStyle),
+          onTap: () => _selectHazardResult(r),
+        ),
+      for (final e in places)
+        ListTile(
+          dense: true,
+          leading: Icon(
+            establishmentIconFor(e.type),
+            color: establishmentColorFor(e.category),
+          ),
+          title: Text(e.name, style: titleStyle),
+          subtitle: Text(e.type, style: subStyle),
+          onTap: () => _selectPlaceResult(e),
+        ),
+    ];
+
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + 12 + 44 + 6,
+      left: 16,
+      right: 16,
+      child: Material(
+        color: AppColors.surface,
+        elevation: 6,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 320),
+          child: tiles.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('No results found', style: subStyle),
+                )
+              : ListView(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.zero,
+                  children: tiles,
+                ),
+        ),
+      ),
+    );
   }
 
   // Fetch verified reports from the backend (same as the admin risk map).
@@ -386,12 +494,6 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  void _centerOnUser() {
-    _mapController.move(_userLocation, 15.0);
-  }
-
-  // Find the nearest establishment flagged as an evacuation center, then
-  // open directions to it in the device's maps app.
   // ── Nearest establishment routing (in-app, follows roads via OSRM) ──
   List<LatLng> _routePoints = []; // the drawn route polyline
   Establishment? _routeDest; // the destination establishment
@@ -682,6 +784,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
           // ── Map (with pull-to-refresh) ──
@@ -849,23 +952,52 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ],
                     ),
-                    child: const Row(
+                    child: Row(
                       children: [
-                        SizedBox(width: 14),
-                        Icon(
+                        const SizedBox(width: 14),
+                        const Icon(
                           Icons.search_rounded,
                           size: 20,
                           color: AppColors.label,
                         ),
-                        SizedBox(width: 10),
-                        Text(
-                          'Search barangay or hazard...',
-                          style: TextStyle(
-                            fontFamily: 'Sora',
-                            fontSize: 13,
-                            color: AppColors.label,
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: _searchController,
+                            focusNode: _searchFocus,
+                            textInputAction: TextInputAction.search,
+                            onChanged: (v) => setState(() => _query = v),
+                            onTapOutside: (_) => _searchFocus.unfocus(),
+                            style: const TextStyle(
+                              fontFamily: 'Sora',
+                              fontSize: 13,
+                              color: AppColors.heading,
+                            ),
+                            decoration: const InputDecoration(
+                              hintText: 'Search barangay or hazard...',
+                              hintStyle: TextStyle(
+                                fontFamily: 'Sora',
+                                fontSize: 13,
+                                color: AppColors.label,
+                              ),
+                              filled: false,
+                              isDense: true,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              contentPadding: EdgeInsets.zero,
+                            ),
                           ),
                         ),
+                        if (_query.isNotEmpty)
+                          IconButton(
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              size: 18,
+                              color: AppColors.label,
+                            ),
+                            onPressed: _clearSearch,
+                          ),
                       ],
                     ),
                   ),
@@ -945,6 +1077,9 @@ class _MapScreenState extends State<MapScreen> {
               ],
             ),
           ),
+
+          // ── Search results dropdown ──
+          if (_query.trim().isNotEmpty) _buildSearchResults(),
 
           // ── Locate me button (right side, above the evac button) ──
           Positioned(
@@ -1074,36 +1209,6 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // ── My location button ──
-          Positioned(
-            bottom: 24,
-            right: 16,
-            child: GestureDetector(
-              onTap: _centerOnUser,
-              child: Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.border),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x12000000),
-                      blurRadius: 8,
-                      offset: Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.my_location_rounded,
-                  size: 20,
-                  color: AppColors.primary,
-                ),
-              ),
-            ),
-          ),
-
           // ── Legend ──
           if (_showLegend)
             Positioned(
@@ -1160,88 +1265,73 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          // ── Find Nearest button (Evacuation / Medical) — bottom, own position ──
+          // ── Find Nearest button (icon only) — above the locate button ──
           Positioned(
-            left: 16,
             right: 16,
-            bottom: 20,
-            child: SafeArea(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: _routing ? null : _openNearestChooser,
-                      child: Container(
-                        height: 52,
-                        decoration: BoxDecoration(
-                          color: AppColors.primary,
-                          borderRadius: BorderRadius.circular(14),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Color(0x33000000),
-                              blurRadius: 12,
-                              offset: Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: Center(
-                          child: _routing
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : const Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      Icons.near_me_rounded,
-                                      color: Colors.white,
-                                      size: 20,
-                                    ),
-                                    SizedBox(width: 8),
-                                    Text(
-                                      'Find Nearest Center',
-                                      style: TextStyle(
-                                        fontFamily: 'Sora',
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (_routePoints.isNotEmpty) ...[
-                    const SizedBox(width: 10),
-                    GestureDetector(
-                      onTap: _clearRoute,
-                      child: Container(
-                        width: 52,
-                        height: 52,
-                        decoration: BoxDecoration(
-                          color: AppColors.surface,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: AppColors.border),
-                        ),
-                        child: const Icon(
-                          Icons.close_rounded,
-                          color: AppColors.secondary,
-                          size: 22,
-                        ),
-                      ),
+            bottom: 146,
+            child: GestureDetector(
+              onTap: _routing ? null : _openNearestChooser,
+              child: Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: AppColors.primary,
+                  borderRadius: BorderRadius.circular(23),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F000000),
+                      blurRadius: 10,
+                      offset: Offset(0, 3),
                     ),
                   ],
-                ],
+                ),
+                child: _routing
+                    ? const Padding(
+                        padding: EdgeInsets.all(13),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.near_me_rounded,
+                        color: Colors.white,
+                        size: 22,
+                      ),
               ),
             ),
           ),
+
+          // ── Clear route button (only when a route is shown) ──
+          if (_routePoints.isNotEmpty)
+            Positioned(
+              right: 16,
+              bottom: 202,
+              child: GestureDetector(
+                onTap: _clearRoute,
+                child: Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(23),
+                    border: Border.all(color: AppColors.border),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x1F000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.close_rounded,
+                    color: AppColors.secondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
