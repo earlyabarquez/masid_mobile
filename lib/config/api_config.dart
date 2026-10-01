@@ -9,7 +9,7 @@ class ApiConfig {
   // static const String baseUrl =
   //     "http://192.168.100.10:8080"; // for wifi connectivity (Note: it should be the same wifi connectivity)
 
-  static const String baseUrl = "http://192.168.100.205:8080";
+  static const String baseUrl = "http://192.168.1.17:8080";
 
   // static const String baseUrl = "http://192.168.1.125:8080";
   // static const String baseUrl = "http://localhost:8080"; // overall

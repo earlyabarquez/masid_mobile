@@ -132,9 +132,6 @@ class _MapScreenState extends State<MapScreen> {
   final _establishmentService = EstablishmentService();
 
   Timer? _refreshTimer;
-  final TextEditingController _searchController = TextEditingController();
-  final FocusNode _searchFocus = FocusNode();
-  String _query = '';
   bool _isSatellite = false;
   bool _showLegend = true;
   bool _showEstablishments = false;
@@ -273,112 +270,8 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
-    _searchController.dispose();
-    _searchFocus.dispose();
+    _navStream?.cancel();
     super.dispose();
-  }
-
-  // ── Search ──
-  void _clearSearch() {
-    _searchController.clear();
-    _searchFocus.unfocus();
-    setState(() => _query = '');
-  }
-
-  void _selectHazardResult(Report r) {
-    _clearSearch();
-    _mapController.move(LatLng(r.latitude, r.longitude), 17);
-    _onHazardTapped(r);
-  }
-
-  void _selectPlaceResult(Establishment e) {
-    _clearSearch();
-    setState(() => _showEstablishments = true);
-    _mapController.move(LatLng(e.latitude, e.longitude), 17);
-    _onEstablishmentTapped(e);
-  }
-
-  Widget _buildSearchResults() {
-    final q = _query.trim().toLowerCase();
-    final hazards = _reports
-        .where(
-          (r) =>
-              r.hazardName.toLowerCase().contains(q) ||
-              r.statusName.toLowerCase().contains(q),
-        )
-        .take(6)
-        .toList();
-    final places = _establishments
-        .where(
-          (e) =>
-              e.name.toLowerCase().contains(q) ||
-              e.type.toLowerCase().contains(q) ||
-              e.category.toLowerCase().contains(q),
-        )
-        .take(6)
-        .toList();
-
-    const titleStyle = TextStyle(
-      fontFamily: 'Sora',
-      fontSize: 13,
-      fontWeight: FontWeight.w600,
-      color: AppColors.heading,
-    );
-    const subStyle = TextStyle(
-      fontFamily: 'Sora',
-      fontSize: 11,
-      color: AppColors.label,
-    );
-
-    final tiles = <Widget>[
-      for (final r in hazards)
-        ListTile(
-          dense: true,
-          leading: Icon(
-            hazardIconFor(r.hazardName),
-            color: severityColor(r.severity, r.statusName),
-          ),
-          title: Text(r.hazardName, style: titleStyle),
-          subtitle: Text(r.statusName, style: subStyle),
-          onTap: () => _selectHazardResult(r),
-        ),
-      for (final e in places)
-        ListTile(
-          dense: true,
-          leading: Icon(
-            establishmentIconFor(e.type),
-            color: establishmentColorFor(e.category),
-          ),
-          title: Text(e.name, style: titleStyle),
-          subtitle: Text(e.type, style: subStyle),
-          onTap: () => _selectPlaceResult(e),
-        ),
-    ];
-
-    return Positioned(
-      top: MediaQuery.of(context).padding.top + 12 + 44 + 6,
-      left: 16,
-      right: 16,
-      child: Material(
-        color: AppColors.surface,
-        elevation: 6,
-        borderRadius: BorderRadius.circular(12),
-        clipBehavior: Clip.antiAlias,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 320),
-          child: tiles.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text('No results found', style: subStyle),
-                )
-              : ListView(
-                  shrinkWrap: true,
-                  padding: EdgeInsets.zero,
-                  children: tiles,
-                ),
-        ),
-      ),
-    );
   }
 
   // Fetch verified reports from the backend (same as the admin risk map).
@@ -500,6 +393,14 @@ class _MapScreenState extends State<MapScreen> {
   double _routeDistanceM = 0; // route distance (metres)
   bool _routing = false;
 
+  // ── Live navigation state ──
+  bool _navigating = false; // turn-by-turn mode active
+  List<_NavStep> _navSteps = []; // turn-by-turn instructions
+  int _currentStep = 0; // index of the current step
+  double _distToNextTurn = 0; // metres to the next maneuver
+  double _distRemaining = 0; // metres remaining to destination
+  StreamSubscription<Position>? _navStream; // live GPS during navigation
+
   // Find the nearest establishment of a kind, then draw a road route to it.
   //  kind: "evacuation" -> flagged evac centers; "medical" -> health facilities.
   Future<void> _routeToNearest(String kind) async {
@@ -538,7 +439,7 @@ class _MapScreenState extends State<MapScreen> {
 
     setState(() => _routing = true);
     try {
-      // Ask OSRM for the road route from the user to the destination.
+      // Ask OSRM for the road route + turn-by-turn steps.
       final route = await _fetchRoute(
         _userLocation,
         LatLng(nearest.latitude, nearest.longitude),
@@ -548,21 +449,14 @@ class _MapScreenState extends State<MapScreen> {
         _routeDest = nearest;
         _routePoints = route.$1.isNotEmpty
             ? route.$1
-            : [
-                _userLocation,
-                LatLng(nearest!.latitude, nearest.longitude),
-              ]; // fallback: straight line
+            : [_userLocation, LatLng(nearest!.latitude, nearest.longitude)];
         _routeDistanceM = route.$2 > 0 ? route.$2 : best;
+        _navSteps = route.$3;
       });
-
-      // Fit the map to show the whole route.
       _fitRoute();
-
-      // Show a small info card.
       _showRouteCard(kind);
     } catch (e) {
       if (!mounted) return;
-      // Fallback: straight line if routing fails.
       setState(() {
         _routeDest = nearest;
         _routePoints = [
@@ -570,6 +464,7 @@ class _MapScreenState extends State<MapScreen> {
           LatLng(nearest!.latitude, nearest.longitude),
         ];
         _routeDistanceM = best;
+        _navSteps = [];
       });
       _fitRoute();
       _showRouteCard(kind);
@@ -578,24 +473,175 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // ── Start live turn-by-turn navigation ──
+  Future<void> _startNavigation() async {
+    if (_routePoints.length < 2) return;
+    setState(() {
+      _navigating = true;
+      _currentStep = 0;
+      _distRemaining = _routeDistanceM;
+    });
+
+    // Follow the user's live position.
+    _navStream?.cancel();
+    _navStream =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.bestForNavigation,
+            distanceFilter: 5, // update every ~5 metres
+          ),
+        ).listen((pos) {
+          if (!mounted || !_navigating) return;
+          final here = LatLng(pos.latitude, pos.longitude);
+          setState(() {
+            _userLocation = here;
+            _hasRealLocation = true;
+          });
+          _updateNavProgress(here);
+          // Keep the camera on the user while navigating.
+          _mapController.move(here, 17);
+        });
+  }
+
+  void _stopNavigation() {
+    _navStream?.cancel();
+    _navStream = null;
+    setState(() {
+      _navigating = false;
+    });
+    _fitRoute();
+  }
+
+  // Update the current step + distances as the user moves.
+  void _updateNavProgress(LatLng here) {
+    const distance = Distance();
+
+    // Distance to the destination.
+    if (_routeDest != null) {
+      _distRemaining = distance.as(
+        LengthUnit.Meter,
+        here,
+        LatLng(_routeDest!.latitude, _routeDest!.longitude),
+      );
+    }
+
+    // Arrived?
+    if (_distRemaining < 25) {
+      _snack('You have arrived at ${_routeDest?.name ?? "your destination"}');
+      _stopNavigation();
+      return;
+    }
+
+    if (_navSteps.isEmpty) {
+      setState(() {});
+      return;
+    }
+
+    // Advance to the next step once we're close to the current maneuver point.
+    final step = _navSteps[_currentStep];
+    final dToManeuver = distance.as(LengthUnit.Meter, here, step.location);
+    _distToNextTurn = dToManeuver;
+
+    if (dToManeuver < 20 && _currentStep < _navSteps.length - 1) {
+      setState(() {
+        _currentStep++;
+      });
+    } else {
+      setState(() {});
+    }
+  }
+
   // Call the free OSRM public API for a driving route.
   // Returns (list of points, distance in metres).
-  Future<(List<LatLng>, double)> _fetchRoute(LatLng from, LatLng to) async {
+  // Returns (route points, total distance, turn-by-turn steps).
+  Future<(List<LatLng>, double, List<_NavStep>)> _fetchRoute(
+    LatLng from,
+    LatLng to,
+  ) async {
     final url =
         'https://router.project-osrm.org/route/v1/driving/'
         '${from.longitude},${from.latitude};${to.longitude},${to.latitude}'
-        '?overview=full&geometries=geojson';
+        '?overview=full&geometries=geojson&steps=true';
     final res = await _dio.getUri(Uri.parse(url));
     final data = res.data;
     final routes = data['routes'] as List?;
-    if (routes == null || routes.isEmpty) return (<LatLng>[], 0.0);
+    if (routes == null || routes.isEmpty)
+      return (<LatLng>[], 0.0, <_NavStep>[]);
     final route = routes[0];
     final dist = (route['distance'] as num?)?.toDouble() ?? 0.0;
     final coords = route['geometry']['coordinates'] as List;
     final pts = coords
         .map((p) => LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()))
         .toList();
-    return (pts, dist);
+
+    // Parse turn-by-turn steps from the first leg.
+    final steps = <_NavStep>[];
+    final legs = route['legs'] as List?;
+    if (legs != null && legs.isNotEmpty) {
+      final legSteps = legs[0]['steps'] as List?;
+      if (legSteps != null) {
+        for (final s in legSteps) {
+          final maneuver = s['maneuver'] ?? {};
+          final loc = maneuver['location'] as List?; // [lng, lat]
+          final type = (maneuver['type'] ?? '').toString();
+          final modifier = (maneuver['modifier'] ?? '').toString();
+          final name = (s['name'] ?? '').toString();
+          final stepDist = (s['distance'] as num?)?.toDouble() ?? 0.0;
+          steps.add(
+            _NavStep(
+              instruction: _instructionText(type, modifier, name),
+              icon: _maneuverIcon(type, modifier),
+              location: (loc != null && loc.length >= 2)
+                  ? LatLng(
+                      (loc[1] as num).toDouble(),
+                      (loc[0] as num).toDouble(),
+                    )
+                  : from,
+              distance: stepDist,
+            ),
+          );
+        }
+      }
+    }
+    return (pts, dist, steps);
+  }
+
+  // Build a readable instruction from the OSRM maneuver.
+  String _instructionText(String type, String modifier, String road) {
+    final on = road.isNotEmpty ? ' onto $road' : '';
+    switch (type) {
+      case 'depart':
+        return 'Head out' + (road.isNotEmpty ? ' on $road' : '');
+      case 'arrive':
+        return 'Arrive at your destination';
+      case 'turn':
+        return 'Turn ${modifier.isEmpty ? '' : modifier}$on'.trim();
+      case 'continue':
+        return 'Continue ${modifier}$on'.trim();
+      case 'merge':
+        return 'Merge ${modifier}$on'.trim();
+      case 'roundabout':
+      case 'rotary':
+        return 'Take the roundabout$on';
+      case 'fork':
+        return 'Keep ${modifier}$on'.trim();
+      case 'end of road':
+        return 'Turn ${modifier}$on'.trim();
+      default:
+        return 'Continue${road.isNotEmpty ? ' on $road' : ''}';
+    }
+  }
+
+  IconData _maneuverIcon(String type, String modifier) {
+    if (type == 'arrive') return Icons.place_rounded;
+    if (type == 'depart') return Icons.my_location_rounded;
+    if (type == 'roundabout' || type == 'rotary')
+      return Icons.roundabout_right_rounded;
+    if (modifier.contains('left')) return Icons.turn_left_rounded;
+    if (modifier.contains('right')) return Icons.turn_right_rounded;
+    if (modifier.contains('straight') || type == 'continue')
+      return Icons.straight_rounded;
+    return Icons.navigation_rounded;
   }
 
   void _fitRoute() {
@@ -635,48 +681,70 @@ class _MapScreenState extends State<MapScreen> {
           color: AppColors.surface,
           borderRadius: BorderRadius.circular(16),
         ),
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(
-                color: (isEvac ? AppColors.success : AppColors.error)
-                    .withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(
-                isEvac
-                    ? Icons.safety_divider_rounded
-                    : Icons.local_hospital_rounded,
-                color: isEvac ? AppColors.success : AppColors.error,
-                size: 24,
-              ),
+            Row(
+              children: [
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: (isEvac ? AppColors.success : AppColors.error)
+                        .withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    isEvac
+                        ? Icons.safety_divider_rounded
+                        : Icons.local_hospital_rounded,
+                    color: isEvac ? AppColors.success : AppColors.error,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        dest.name,
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.heading,
+                        ),
+                      ),
+                      Text(
+                        '${isEvac ? (dest.evacType ?? "Evacuation") + " Evacuation Center" : "Medical Center"} · ${(_routeDistanceM / 1000).toStringAsFixed(2)} km',
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          color: AppColors.muted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    dest.name,
-                    style: const TextStyle(
-                      fontFamily: 'Sora',
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.heading,
-                    ),
-                  ),
-                  Text(
-                    '${isEvac ? (dest.evacType ?? "Evacuation") + " Evacuation Center" : "Medical Center"} · ${(_routeDistanceM / 1000).toStringAsFixed(2)} km',
-                    style: const TextStyle(
-                      fontFamily: 'Sora',
-                      fontSize: 12,
-                      color: AppColors.muted,
-                    ),
-                  ),
-                ],
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _startNavigation();
+                },
+                icon: const Icon(Icons.navigation_rounded, size: 18),
+                label: const Text('Start Navigation'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
               ),
             ),
           ],
@@ -784,7 +852,6 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
           // ── Map (with pull-to-refresh) ──
@@ -952,52 +1019,23 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ],
                     ),
-                    child: Row(
+                    child: const Row(
                       children: [
-                        const SizedBox(width: 14),
-                        const Icon(
+                        SizedBox(width: 14),
+                        Icon(
                           Icons.search_rounded,
                           size: 20,
                           color: AppColors.label,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: TextField(
-                            controller: _searchController,
-                            focusNode: _searchFocus,
-                            textInputAction: TextInputAction.search,
-                            onChanged: (v) => setState(() => _query = v),
-                            onTapOutside: (_) => _searchFocus.unfocus(),
-                            style: const TextStyle(
-                              fontFamily: 'Sora',
-                              fontSize: 13,
-                              color: AppColors.heading,
-                            ),
-                            decoration: const InputDecoration(
-                              hintText: 'Search barangay or hazard...',
-                              hintStyle: TextStyle(
-                                fontFamily: 'Sora',
-                                fontSize: 13,
-                                color: AppColors.label,
-                              ),
-                              filled: false,
-                              isDense: true,
-                              border: InputBorder.none,
-                              enabledBorder: InputBorder.none,
-                              focusedBorder: InputBorder.none,
-                              contentPadding: EdgeInsets.zero,
-                            ),
+                        SizedBox(width: 10),
+                        Text(
+                          'Search barangay or hazard...',
+                          style: TextStyle(
+                            fontFamily: 'Sora',
+                            fontSize: 13,
+                            color: AppColors.label,
                           ),
                         ),
-                        if (_query.isNotEmpty)
-                          IconButton(
-                            icon: const Icon(
-                              Icons.close_rounded,
-                              size: 18,
-                              color: AppColors.label,
-                            ),
-                            onPressed: _clearSearch,
-                          ),
                       ],
                     ),
                   ),
@@ -1078,8 +1116,117 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
 
-          // ── Search results dropdown ──
-          if (_query.trim().isNotEmpty) _buildSearchResults(),
+          // ── Turn-by-turn directions panel (top, while navigating) ──
+          if (_navigating && _navSteps.isNotEmpty)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 12,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppColors.primary,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x33000000),
+                      blurRadius: 12,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      _navSteps[_currentStep].icon,
+                      color: Colors.white,
+                      size: 36,
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _navSteps[_currentStep].instruction,
+                            style: const TextStyle(
+                              fontFamily: 'Sora',
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _distToNextTurn > 0
+                                ? 'In ${_distToNextTurn.round()} m'
+                                : '${(_distRemaining / 1000).toStringAsFixed(2)} km to destination',
+                            style: const TextStyle(
+                              fontFamily: 'Sora',
+                              fontSize: 13,
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: _stopNavigation,
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                        child: const Icon(
+                          Icons.close_rounded,
+                          color: Colors.white,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+          // ── Distance-remaining pill (bottom, while navigating) ──
+          if (_navigating)
+            Positioned(
+              bottom: 24,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(100),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x22000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Text(
+                    '${(_distRemaining / 1000).toStringAsFixed(2)} km • ${_routeDest?.name ?? ""}',
+                    style: const TextStyle(
+                      fontFamily: 'Sora',
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.heading,
+                    ),
+                  ),
+                ),
+              ),
+            ),
 
           // ── Locate me button (right side, above the evac button) ──
           Positioned(
@@ -1388,4 +1535,19 @@ class _UserLocationDot extends StatelessWidget {
       ),
     );
   }
+}
+
+// A single turn-by-turn navigation step.
+class _NavStep {
+  final String instruction;
+  final IconData icon;
+  final LatLng location; // the maneuver point
+  final double distance; // metres for this step
+
+  _NavStep({
+    required this.instruction,
+    required this.icon,
+    required this.location,
+    required this.distance,
+  });
 }
