@@ -4,6 +4,54 @@ import '../../services/report_service.dart';
 import '../map/map_screen.dart'; // severityColor + hazardIconFor
 import 'reports_screen.dart'; // statusBg + statusText + formatReportDate
 
+/// Icon + copy shown in the review status card for each report status.
+class _StatusInfo {
+  final IconData icon;
+  final String title;
+  final String message;
+  const _StatusInfo(this.icon, this.title, this.message);
+}
+
+_StatusInfo _statusInfo(String status) {
+  switch (status) {
+    case 'Verified':
+      return const _StatusInfo(
+        Icons.verified_rounded,
+        'Report Verified',
+        'The MDRRMO has verified your report. It is now visible on the risk map.',
+      );
+    case 'Rejected':
+      return const _StatusInfo(
+        Icons.cancel_rounded,
+        'Report Rejected',
+        'Your report was reviewed but could not be accepted.',
+      );
+    case 'Resolved':
+      return const _StatusInfo(
+        Icons.task_alt_rounded,
+        'Hazard Resolved',
+        'This hazard has been marked as resolved by the MDRRMO.',
+      );
+    default:
+      return const _StatusInfo(
+        Icons.schedule_rounded,
+        'Awaiting Review',
+        'Your report was received and is waiting to be reviewed by the MDRRMO.',
+      );
+  }
+}
+
+String _remarksTitle(String status) {
+  switch (status) {
+    case 'Rejected':
+      return 'Reason for Rejection';
+    case 'Resolved':
+      return 'Resolution Notes';
+    default:
+      return 'Admin Remarks';
+  }
+}
+
 class ReportDetailScreen extends StatelessWidget {
   final Report report;
 
@@ -12,6 +60,14 @@ class ReportDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sevColor = severityColor(report.severity, report.statusName);
+
+    final status = report.statusName;
+    final info = _statusInfo(status);
+    final accent = statusText(status);
+    final notes = (report.adminNotes ?? '').trim();
+    final hasNotes = notes.isNotEmpty;
+    // Pending reports only show the remarks card if an admin already left a note.
+    final showRemarks = status != 'Pending' || hasNotes;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -85,16 +141,16 @@ class ReportDetailScreen extends StatelessWidget {
                           vertical: 5,
                         ),
                         decoration: BoxDecoration(
-                          color: statusBg(report.statusName),
+                          color: statusBg(status),
                           borderRadius: BorderRadius.circular(100),
                         ),
                         child: Text(
-                          report.statusName,
+                          status,
                           style: TextStyle(
                             fontFamily: 'Sora',
                             fontSize: 11,
                             fontWeight: FontWeight.w700,
-                            color: statusText(report.statusName),
+                            color: accent,
                           ),
                         ),
                       ),
@@ -103,6 +159,103 @@ class ReportDetailScreen extends StatelessWidget {
                 ],
               ),
             ),
+
+            const SizedBox(height: 12),
+
+            // ── Review status ──
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: statusBg(status),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: accent.withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(info.icon, size: 22, color: accent),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          info.title,
+                          style: TextStyle(
+                            fontFamily: 'Sora',
+                            fontSize: 14,
+                            fontWeight: FontWeight.w800,
+                            color: accent,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          info.message,
+                          style: TextStyle(
+                            fontFamily: 'Sora',
+                            fontSize: 12,
+                            height: 1.55,
+                            color: accent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ── Admin remarks ──
+            if (showRemarks) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: accent.withValues(alpha: 0.25)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.chat_bubble_outline_rounded,
+                          size: 16,
+                          color: accent,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _remarksTitle(status),
+                          style: TextStyle(
+                            fontFamily: 'Sora',
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: accent,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      hasNotes ? notes : 'No remarks were added by the admin.',
+                      style: TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 13,
+                        height: 1.6,
+                        fontStyle: hasNotes
+                            ? FontStyle.normal
+                            : FontStyle.italic,
+                        color: hasNotes ? AppColors.body : AppColors.label,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
 
             const SizedBox(height: 12),
 
@@ -321,58 +474,6 @@ class ReportDetailScreen extends StatelessWidget {
                 ],
               ),
             ),
-
-            // ── Admin rejection notes ──
-            if (report.statusName == 'Rejected' &&
-                report.adminNotes != null &&
-                report.adminNotes!.trim().isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: AppColors.rejectedBg,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: AppColors.error.withValues(alpha: 0.2),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline_rounded,
-                          size: 16,
-                          color: AppColors.error,
-                        ),
-                        SizedBox(width: 8),
-                        Text(
-                          'Rejection Reason',
-                          style: TextStyle(
-                            fontFamily: 'Sora',
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.rejectedText,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      report.adminNotes!,
-                      style: const TextStyle(
-                        fontFamily: 'Sora',
-                        fontSize: 13,
-                        color: AppColors.rejectedText,
-                        height: 1.6,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
 
             const SizedBox(height: 24),
           ],

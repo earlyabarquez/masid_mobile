@@ -6,10 +6,10 @@ class ApiConfig {
   // Switch to this base url if you switching to mobile
 
   // Resto config
-  // static const String baseUrl =
-  //     "http://192.168.100.10:8080"; // for wifi connectivity (Note: it should be the same wifi connectivity)
+  static const String baseUrl =
+      "https://collectible-temporal-transcripts-server.trycloudflare.com"; // for wifi connectivity (Note: it should be the same wifi connectivity)
 
-  static const String baseUrl = "http://192.168.1.17:8080";
+  // static const String baseUrl = "http://192.168.68.103:8080";
 
   // static const String baseUrl = "http://192.168.1.125:8080";
   // static const String baseUrl = "http://localhost:8080"; // overall
