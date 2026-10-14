@@ -7,7 +7,7 @@ class ApiConfig {
 
   // Resto config
   static const String baseUrl =
-      "https://collectible-temporal-transcripts-server.trycloudflare.com"; // for wifi connectivity (Note: it should be the same wifi connectivity)
+      "https://comic-precipitation-endangered-speeches.trycloudflare.com"; // for wifi connectivity (Note: it should be the same wifi connectivity)
 
   // static const String baseUrl = "http://192.168.68.103:8080";
 

@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter_map/flutter_map.dart';    
+import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../config/app_colors.dart';
@@ -146,12 +148,26 @@ class _MapScreenState extends State<MapScreen> {
     AppConstants.defaultLng,
   );
   bool _hasRealLocation = false;
-  final Dio _dio = Dio(); // plain client for the external OSRM routing API
+
+  // Plain client for the external OSRM routing API. Timeouts keep the
+  // "finding route" spinner from hanging forever on a bad connection.
+  final Dio _dio = Dio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 8),
+      receiveTimeout: const Duration(seconds: 10),
+    ),
+  );
 
   static const String _osmTileUrl =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
   static const String _satelliteTileUrl =
       'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+  // ── Live position tracking ──
+  StreamSubscription<Position>? _trackSub; // always-on while the map is open
+  bool _trackPrecise = false; // true = high-rate GPS (only while navigating)
+  double _heading = 0; // degrees clockwise from north
+  bool _followUser = false; // camera follows the user while navigating
 
   @override
   void initState() {
@@ -246,12 +262,55 @@ class _MapScreenState extends State<MapScreen> {
         _snack('Could not get your location. Try again in an open area.');
       }
 
+      // Keep the blue dot (and heading) live from now on.
+      _startTracking(precise: _navigating);
+
       // Start proximity watching (foreground) — alerts on hazards within 100m
       await ProximityService.instance.start();
     } catch (e) {
       if (showFeedback && mounted) _snack('Location error. Please try again.');
     } finally {
       if (mounted) setState(() => _locating = false);
+    }
+  }
+
+  // ── Live tracking ──
+  // One position stream drives both the blue dot and navigation.
+  // Normal mode is battery-friendly; navigation switches to high-rate GPS.
+  void _startTracking({bool precise = false}) {
+    if (_trackSub != null && _trackPrecise == precise) return;
+    _trackSub?.cancel();
+    _trackPrecise = precise;
+    _trackSub = Geolocator.getPositionStream(
+      locationSettings: LocationSettings(
+        accuracy: precise
+            ? LocationAccuracy.bestForNavigation
+            : LocationAccuracy.high,
+        // Small filters = the dot/camera move as you move.
+        // (1 m while navigating, 3 m otherwise.)
+        distanceFilter: precise ? 1 : 3,
+      ),
+    ).listen(_onTrackPosition, onError: (_) {});
+  }
+
+  void _onTrackPosition(Position pos) {
+    if (!mounted) return;
+    final here = LatLng(pos.latitude, pos.longitude);
+
+    // GPS heading is noisy when standing still — only trust it while moving.
+    if (pos.speed > 1.0 && pos.heading >= 0) _heading = pos.heading;
+
+    setState(() {
+      _userLocation = here;
+      _hasRealLocation = true;
+    });
+
+    if (_navigating) {
+      _updateNavProgress(here);
+      // Keep the camera on the user (heading-up) unless they panned away.
+      if (_followUser) {
+        _mapController.moveAndRotate(here, 17, -_heading);
+      }
     }
   }
 
@@ -269,7 +328,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
-    _navStream?.cancel();
+    _trackSub?.cancel();
     super.dispose();
   }
 
@@ -388,21 +447,39 @@ class _MapScreenState extends State<MapScreen> {
 
   // ── Nearest establishment routing (in-app, follows roads via OSRM) ──
   List<LatLng> _routePoints = []; // the drawn route polyline
+  List<double> _cumDist = []; // cumulative metres along _routePoints
   Establishment? _routeDest; // the destination establishment
+  String _navKind = 'evacuation'; // "evacuation" | "medical" (for rerouting)
   double _routeDistanceM = 0; // route distance (metres)
+  double _routeDurationS = 0; // OSRM driving time for the whole route
   bool _routing = false;
 
   // ── Live navigation state ──
   bool _navigating = false; // turn-by-turn mode active
   List<_NavStep> _navSteps = []; // turn-by-turn instructions
-  int _currentStep = 0; // index of the current step
+  List<double> _stepAlong = []; // metres along the route of each maneuver
+  int _currentStep = 0; // index of the upcoming maneuver
+  int _routeSeg = 0; // index of the route segment the user is on
   double _distToNextTurn = 0; // metres to the next maneuver
-  double _distRemaining = 0; // metres remaining to destination
-  StreamSubscription<Position>? _navStream; // live GPS during navigation
+  double _distRemaining = 0; // metres remaining along the route
+  double _etaSeconds = 0; // estimated time remaining
+  int _offRouteCount = 0; // consecutive off-route position updates
+  bool _rerouting = false;
+  DateTime _lastReroute = DateTime.fromMillisecondsSinceEpoch(0);
 
   // Find the nearest establishment of a kind, then draw a road route to it.
   //  kind: "evacuation" -> flagged evac centers; "medical" -> health facilities.
   Future<void> _routeToNearest(String kind) async {
+    // Never route from the default map center — wait for a real GPS fix.
+    if (!_hasRealLocation) {
+      if (_locating) {
+        _snack('Getting your location… try again in a moment.');
+        return;
+      }
+      await _initLocation(moveMap: true, showFeedback: true);
+      if (!_hasRealLocation) return;
+    }
+
     List<Establishment> pool;
     if (kind == "evacuation") {
       pool = _establishments.where((e) => e.isEvacuationCenter).toList();
@@ -419,52 +496,24 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Pick the closest by straight-line distance (fast pre-filter).
+    // Pre-filter: the 5 closest by straight-line distance (fast).
     const distance = Distance();
-    Establishment? nearest;
-    double best = double.infinity;
-    for (final e in pool) {
-      final d = distance.as(
-        LengthUnit.Meter,
-        _userLocation,
-        LatLng(e.latitude, e.longitude),
-      );
-      if (d < best) {
-        best = d;
-        nearest = e;
-      }
-    }
-    if (nearest == null) return;
+    double straight(Establishment e) => distance.as(
+      LengthUnit.Meter,
+      _userLocation,
+      LatLng(e.latitude, e.longitude),
+    );
+    final ranked = [...pool]
+      ..sort((a, b) => straight(a).compareTo(straight(b)));
+    final candidates = ranked.take(5).toList();
 
     setState(() => _routing = true);
     try {
-      // Ask OSRM for the road route + turn-by-turn steps.
-      final route = await _fetchRoute(
-        _userLocation,
-        LatLng(nearest.latitude, nearest.longitude),
-      );
+      // Pick the one that is actually nearest by ROAD (falls back to the
+      // straight-line winner if the routing service is unreachable).
+      final nearest = await _nearestByRoad(candidates) ?? candidates.first;
+      await _loadRouteTo(nearest, kind);
       if (!mounted) return;
-      setState(() {
-        _routeDest = nearest;
-        _routePoints = route.$1.isNotEmpty
-            ? route.$1
-            : [_userLocation, LatLng(nearest!.latitude, nearest.longitude)];
-        _routeDistanceM = route.$2 > 0 ? route.$2 : best;
-        _navSteps = route.$3;
-      });
-      _fitRoute();
-      _showRouteCard(kind);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _routeDest = nearest;
-        _routePoints = [
-          _userLocation,
-          LatLng(nearest!.latitude, nearest.longitude),
-        ];
-        _routeDistanceM = best;
-        _navSteps = [];
-      });
       _fitRoute();
       _showRouteCard(kind);
     } finally {
@@ -472,91 +521,234 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // Ask OSRM's table service for road distances to all candidates at once.
+  Future<Establishment?> _nearestByRoad(List<Establishment> candidates) async {
+    if (candidates.isEmpty) return null;
+    if (candidates.length == 1) return candidates.first;
+    try {
+      final coords = [
+        '${_userLocation.longitude},${_userLocation.latitude}',
+        ...candidates.map((e) => '${e.longitude},${e.latitude}'),
+      ].join(';');
+      final url =
+          'https://router.project-osrm.org/table/v1/driving/$coords'
+          '?sources=0&annotations=distance';
+      final res = await _dio.getUri(Uri.parse(url));
+      final row = (res.data['distances'] as List).first as List;
+      Establishment? best;
+      double bestD = double.infinity;
+      for (int i = 0; i < candidates.length; i++) {
+        final v = row[i + 1]; // index 0 is the user themself
+        if (v is num && v < bestD) {
+          bestD = v.toDouble();
+          best = candidates[i];
+        }
+      }
+      return best;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Fetch a road route to [dest] and store it (falls back to a straight line).
+  Future<void> _loadRouteTo(
+    Establishment dest,
+    String kind, {
+    LatLng? from,
+  }) async {
+    final start = from ?? _userLocation;
+    final end = LatLng(dest.latitude, dest.longitude);
+
+    _RouteResult? r;
+    try {
+      r = await _fetchRoute(start, end);
+    } catch (_) {
+      r = null;
+    }
+    if (!mounted) return;
+
+    final pts = (r != null && r.points.length >= 2) ? r.points : [start, end];
+    final cum = _buildCumulative(pts);
+    final steps = r?.steps ?? <_NavStep>[];
+
+    setState(() {
+      _routeDest = dest;
+      _navKind = kind;
+      _routePoints = pts;
+      _cumDist = cum;
+      _routeDistanceM = cum.last;
+      _routeDurationS = r?.duration ?? 0;
+      _navSteps = steps;
+      _stepAlong = steps
+          .map(
+            (s) => _matchToRoute(s.location, pts: pts, cum: cum)?.alongM ?? 0.0,
+          )
+          .toList();
+      _currentStep = steps.length > 1 ? 1 : 0; // step 0 is "depart"
+      _routeSeg = 0;
+      _offRouteCount = 0;
+    });
+  }
+
   // ── Start live turn-by-turn navigation ──
   Future<void> _startNavigation() async {
     if (_routePoints.length < 2) return;
     setState(() {
       _navigating = true;
-      _currentStep = 0;
+      _followUser = true;
+      _offRouteCount = 0;
       _distRemaining = _routeDistanceM;
+      _currentStep = _navSteps.length > 1 ? 1 : 0;
     });
 
-    // Follow the user's live position.
-    _navStream?.cancel();
-    _navStream =
-        Geolocator.getPositionStream(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.bestForNavigation,
-            distanceFilter: 5, // update every ~5 metres
-          ),
-        ).listen((pos) {
-          if (!mounted || !_navigating) return;
-          final here = LatLng(pos.latitude, pos.longitude);
-          setState(() {
-            _userLocation = here;
-            _hasRealLocation = true;
-          });
-          _updateNavProgress(here);
-          // Keep the camera on the user while navigating.
-          _mapController.move(here, 17);
-        });
+    // Switch to high-rate GPS for navigation.
+    _startTracking(precise: true);
+    _updateNavProgress(_userLocation);
+    _mapController.moveAndRotate(_userLocation, 17, -_heading);
   }
 
-  void _stopNavigation() {
-    _navStream?.cancel();
-    _navStream = null;
+  void _stopNavigation({bool fit = true}) {
     setState(() {
       _navigating = false;
+      _followUser = false;
+      _rerouting = false;
     });
-    _fitRoute();
+    // Back to battery-friendly tracking (only if tracking was running).
+    if (_trackSub != null) _startTracking();
+    _mapController.rotate(0);
+    if (fit) _fitRoute();
   }
 
-  // Update the current step + distances as the user moves.
+  // Re-center on the user and resume following (after they panned away).
+  void _recenter() {
+    setState(() => _followUser = true);
+    _mapController.moveAndRotate(_userLocation, 17, -_heading);
+  }
+
+  // Match the user to the route: how far off it they are, which segment they
+  // are on, and how many metres along the route they've travelled.
+  _RouteMatch? _matchToRoute(LatLng p, {List<LatLng>? pts, List<double>? cum}) {
+    final points = pts ?? _routePoints;
+    final cumulative = cum ?? _cumDist;
+    if (points.length < 2 || cumulative.length != points.length) return null;
+
+    const mLat = 111320.0;
+    final mLng = 111320.0 * math.cos(p.latitude * math.pi / 180);
+
+    double best = double.infinity;
+    int bestSeg = 0;
+    double bestAlong = 0;
+
+    for (int i = 0; i < points.length - 1; i++) {
+      // Segment endpoints in metres, relative to p (p is the origin).
+      final ax = (points[i].longitude - p.longitude) * mLng;
+      final ay = (points[i].latitude - p.latitude) * mLat;
+      final bx = (points[i + 1].longitude - p.longitude) * mLng;
+      final by = (points[i + 1].latitude - p.latitude) * mLat;
+      final dx = bx - ax;
+      final dy = by - ay;
+      final len2 = dx * dx + dy * dy;
+
+      double t = 0;
+      if (len2 > 0) {
+        t = (-(ax * dx + ay * dy) / len2).clamp(0.0, 1.0).toDouble();
+      }
+      final cx = ax + t * dx;
+      final cy = ay + t * dy;
+      final d = math.sqrt(cx * cx + cy * cy);
+
+      if (d < best) {
+        best = d;
+        bestSeg = i;
+        bestAlong = cumulative[i] + t * (cumulative[i + 1] - cumulative[i]);
+      }
+    }
+    return _RouteMatch(best, bestSeg, bestAlong);
+  }
+
+  List<double> _buildCumulative(List<LatLng> pts) {
+    const distance = Distance();
+    final cum = <double>[0];
+    for (int i = 1; i < pts.length; i++) {
+      cum.add(cum.last + distance.as(LengthUnit.Meter, pts[i - 1], pts[i]));
+    }
+    return cum;
+  }
+
+  // Update the upcoming step, distances, ETA — and reroute if the user strays.
   void _updateNavProgress(LatLng here) {
+    if (!_navigating || _routeDest == null) return;
     const distance = Distance();
 
-    // Distance to the destination.
-    if (_routeDest != null) {
-      _distRemaining = distance.as(
-        LengthUnit.Meter,
-        here,
-        LatLng(_routeDest!.latitude, _routeDest!.longitude),
-      );
+    final destPoint = LatLng(_routeDest!.latitude, _routeDest!.longitude);
+    final straightToDest = distance.as(LengthUnit.Meter, here, destPoint);
+    final match = _matchToRoute(here);
+
+    if (match != null) {
+      _routeSeg = match.segIndex;
+      final total = _cumDist.last;
+      _distRemaining = math.max(0.0, total - match.alongM);
+      _etaSeconds = (_routeDurationS > 0 && total > 0)
+          ? _routeDurationS * (_distRemaining / total)
+          : 0;
+    } else {
+      _distRemaining = straightToDest;
     }
 
-    // Arrived?
-    if (_distRemaining < 25) {
+    // Arrived? (close in a straight line AND close along the route)
+    if (straightToDest < 25 && _distRemaining < 60) {
       _snack('You have arrived at ${_routeDest?.name ?? "your destination"}');
       _stopNavigation();
       return;
     }
 
-    if (_navSteps.isEmpty) {
-      setState(() {});
-      return;
-    }
-
-    // Advance to the next step once we're close to the current maneuver point.
-    final step = _navSteps[_currentStep];
-    final dToManeuver = distance.as(LengthUnit.Meter, here, step.location);
-    _distToNextTurn = dToManeuver;
-
-    if (dToManeuver < 20 && _currentStep < _navSteps.length - 1) {
-      setState(() {
-        _currentStep++;
-      });
+    // Off-route detection (needs a few consecutive readings to ignore GPS jitter)
+    if (match != null && match.offRouteM > 40) {
+      _offRouteCount++;
     } else {
-      setState(() {});
+      _offRouteCount = 0;
     }
+    if (_offRouteCount >= 3 &&
+        !_rerouting &&
+        DateTime.now().difference(_lastReroute) > const Duration(seconds: 10)) {
+      _reroute(here);
+    }
+
+    // Advance to the next maneuver once we're within ~10 m of the current one.
+    if (match != null &&
+        _navSteps.isNotEmpty &&
+        _stepAlong.length == _navSteps.length) {
+      var next = _currentStep;
+      while (next < _navSteps.length - 1 &&
+          _stepAlong[next] <= match.alongM + 10) {
+        next++;
+      }
+      if (next != _currentStep) {
+        _currentStep = next;
+        HapticFeedback.mediumImpact(); // tactile cue for the next instruction
+      }
+      _distToNextTurn = math.max(0.0, _stepAlong[_currentStep] - match.alongM);
+    }
+
+    setState(() {});
   }
 
-  // Call the free OSRM public API for a driving route.
-  // Returns (list of points, distance in metres).
-  // Returns (route points, total distance, turn-by-turn steps).
-  Future<(List<LatLng>, double, List<_NavStep>)> _fetchRoute(
-    LatLng from,
-    LatLng to,
-  ) async {
+  // User left the route — fetch a fresh one from where they are now.
+  Future<void> _reroute(LatLng from) async {
+    final dest = _routeDest;
+    if (dest == null) return;
+    _rerouting = true;
+    _lastReroute = DateTime.now();
+    if (mounted) setState(() {});
+    await _loadRouteTo(dest, _navKind, from: from);
+    _offRouteCount = 0;
+    _rerouting = false;
+    if (mounted) setState(() {});
+  }
+
+  // Call the free OSRM public API for a driving route (points, distance,
+  // duration and turn-by-turn steps).
+  Future<_RouteResult> _fetchRoute(LatLng from, LatLng to) async {
     final url =
         'https://router.project-osrm.org/route/v1/driving/'
         '${from.longitude},${from.latitude};${to.longitude},${to.latitude}'
@@ -564,10 +756,12 @@ class _MapScreenState extends State<MapScreen> {
     final res = await _dio.getUri(Uri.parse(url));
     final data = res.data;
     final routes = data['routes'] as List?;
-    if (routes == null || routes.isEmpty)
-      return (<LatLng>[], 0.0, <_NavStep>[]);
+    if (routes == null || routes.isEmpty) {
+      return _RouteResult(points: [], distance: 0, duration: 0, steps: []);
+    }
     final route = routes[0];
     final dist = (route['distance'] as num?)?.toDouble() ?? 0.0;
+    final dur = (route['duration'] as num?)?.toDouble() ?? 0.0;
     final coords = route['geometry']['coordinates'] as List;
     final pts = coords
         .map((p) => LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble()))
@@ -602,7 +796,12 @@ class _MapScreenState extends State<MapScreen> {
         }
       }
     }
-    return (pts, dist, steps);
+    return _RouteResult(
+      points: pts,
+      distance: dist,
+      duration: dur,
+      steps: steps,
+    );
   }
 
   // Build a readable instruction from the OSRM maneuver.
@@ -659,11 +858,33 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _clearRoute() {
+    if (_navigating) _stopNavigation(fit: false);
     setState(() {
       _routePoints = [];
+      _cumDist = [];
       _routeDest = null;
       _routeDistanceM = 0;
+      _routeDurationS = 0;
+      _navSteps = [];
+      _stepAlong = [];
     });
+  }
+
+  // While navigating, draw only the part of the route still ahead of the user.
+  List<LatLng> get _visibleRoute {
+    if (!_navigating || _routePoints.length < 2) return _routePoints;
+    final i = math.min(math.max(_routeSeg, 0), _routePoints.length - 2);
+    return [_userLocation, ..._routePoints.sublist(i + 1)];
+  }
+
+  String _fmtDist(double m) =>
+      m >= 1000 ? '${(m / 1000).toStringAsFixed(1)} km' : '${m.round()} m';
+
+  String _fmtEta(double seconds) {
+    final mins = (seconds / 60).ceil();
+    if (mins < 1) return '< 1 min';
+    if (mins >= 60) return '${mins ~/ 60} h ${mins % 60} min';
+    return '$mins min';
   }
 
   void _showRouteCard(String kind) {
@@ -850,6 +1071,8 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final hasSteps = _navSteps.isNotEmpty && _currentStep < _navSteps.length;
+
     return Scaffold(
       body: Stack(
         children: [
@@ -870,6 +1093,13 @@ class _MapScreenState extends State<MapScreen> {
                       options: MapOptions(
                         initialCenter: _userLocation,
                         initialZoom: AppConstants.defaultZoom,
+                        // If the user drags the map during navigation, stop
+                        // following them (a Recenter button appears).
+                        onPositionChanged: (camera, hasGesture) {
+                          if (hasGesture && _navigating && _followUser) {
+                            setState(() => _followUser = false);
+                          }
+                        },
                       ),
                       children: [
                         // Tile layer
@@ -881,6 +1111,8 @@ class _MapScreenState extends State<MapScreen> {
                         ),
 
                         // Establishment markers (schools, churches, health, etc.)
+                        // rotate: true keeps icons upright when the map rotates
+                        // (heading-up navigation).
                         if (_showEstablishments)
                           MarkerLayer(
                             markers: _establishments.map((e) {
@@ -888,6 +1120,7 @@ class _MapScreenState extends State<MapScreen> {
                                 point: LatLng(e.latitude, e.longitude),
                                 width: 30,
                                 height: 30,
+                                rotate: true,
                                 child: GestureDetector(
                                   onTap: () => _onEstablishmentTapped(e),
                                   child: Container(
@@ -917,12 +1150,13 @@ class _MapScreenState extends State<MapScreen> {
                             }).toList(),
                           ),
 
-                        // Route polyline (to nearest evacuation / medical)
-                        if (_routePoints.length >= 2)
+                        // Route polyline (to nearest evacuation / medical).
+                        // While navigating, only the part still ahead is drawn.
+                        if (_visibleRoute.length >= 2)
                           PolylineLayer(
                             polylines: [
                               Polyline(
-                                points: _routePoints,
+                                points: _visibleRoute,
                                 strokeWidth: 5,
                                 color: AppColors.primary,
                                 borderStrokeWidth: 2,
@@ -942,6 +1176,7 @@ class _MapScreenState extends State<MapScreen> {
                                 ),
                                 width: 40,
                                 height: 40,
+                                rotate: true,
                                 child: Icon(
                                   _routeDest!.isEvacuationCenter
                                       ? Icons.safety_divider_rounded
@@ -962,6 +1197,7 @@ class _MapScreenState extends State<MapScreen> {
                               point: LatLng(r.latitude, r.longitude),
                               width: 48,
                               height: 48,
+                              rotate: true,
                               child: GestureDetector(
                                 onTap: () => _onHazardTapped(r),
                                 child: PulsingMarker(
@@ -976,14 +1212,19 @@ class _MapScreenState extends State<MapScreen> {
                           }).toList(),
                         ),
 
-                        // User location marker
+                        // User location marker: blue dot normally, a heading
+                        // arrow while navigating. The arrow rotates WITH the map
+                        // (rotate: false) so it always points where you're heading.
                         MarkerLayer(
                           markers: [
                             Marker(
                               point: _userLocation,
-                              width: 36,
-                              height: 36,
-                              child: const _UserLocationDot(),
+                              width: 44,
+                              height: 44,
+                              rotate: false,
+                              child: _navigating
+                                  ? _NavArrow(heading: _heading)
+                                  : const _UserLocationDot(),
                             ),
                           ],
                         ),
@@ -1116,7 +1357,7 @@ class _MapScreenState extends State<MapScreen> {
           ),
 
           // ── Turn-by-turn directions panel (top, while navigating) ──
-          if (_navigating && _navSteps.isNotEmpty)
+          if (_navigating)
             Positioned(
               top: MediaQuery.of(context).padding.top + 12,
               left: 16,
@@ -1137,7 +1378,9 @@ class _MapScreenState extends State<MapScreen> {
                 child: Row(
                   children: [
                     Icon(
-                      _navSteps[_currentStep].icon,
+                      hasSteps
+                          ? _navSteps[_currentStep].icon
+                          : Icons.navigation_rounded,
                       color: Colors.white,
                       size: 36,
                     ),
@@ -1148,7 +1391,9 @@ class _MapScreenState extends State<MapScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            _navSteps[_currentStep].instruction,
+                            hasSteps
+                                ? _navSteps[_currentStep].instruction
+                                : 'Head to ${_routeDest?.name ?? "your destination"}',
                             style: const TextStyle(
                               fontFamily: 'Sora',
                               fontSize: 16,
@@ -1158,9 +1403,9 @@ class _MapScreenState extends State<MapScreen> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            _distToNextTurn > 0
-                                ? 'In ${_distToNextTurn.round()} m'
-                                : '${(_distRemaining / 1000).toStringAsFixed(2)} km to destination',
+                            hasSteps
+                                ? 'In ${_fmtDist(_distToNextTurn)}'
+                                : '${_fmtDist(_distRemaining)} to destination',
                             style: const TextStyle(
                               fontFamily: 'Sora',
                               fontSize: 13,
@@ -1191,7 +1436,55 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // ── Distance-remaining pill (bottom, while navigating) ──
+          // ── "Rerouting…" chip (under the directions panel) ──
+          if (_navigating && _rerouting)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 108,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(100),
+                    border: Border.all(color: AppColors.border),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x22000000),
+                        blurRadius: 8,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 10),
+                      Text(
+                        'Rerouting…',
+                        style: TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.heading,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // ── Distance / ETA pill (bottom, while navigating) ──
           if (_navigating)
             Positioned(
               bottom: 24,
@@ -1215,7 +1508,8 @@ class _MapScreenState extends State<MapScreen> {
                     ],
                   ),
                   child: Text(
-                    '${(_distRemaining / 1000).toStringAsFixed(2)} km • ${_routeDest?.name ?? ""}',
+                    '${_etaSeconds > 0 ? "${_fmtEta(_etaSeconds)} · " : ""}'
+                    '${_fmtDist(_distRemaining)} • ${_routeDest?.name ?? ""}',
                     style: const TextStyle(
                       fontFamily: 'Sora',
                       fontSize: 13,
@@ -1355,8 +1649,8 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // ── Legend ──
-          if (_showLegend)
+          // ── Legend (hidden while navigating so it doesn't crowd the pill) ──
+          if (_showLegend && !_navigating)
             Positioned(
               bottom: 24,
               left: 16,
@@ -1478,6 +1772,36 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
+
+          // ── Recenter button (navigating, but the user panned the map away) ──
+          if (_navigating && !_followUser)
+            Positioned(
+              right: 16,
+              bottom: 258,
+              child: GestureDetector(
+                onTap: _recenter,
+                child: Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary,
+                    borderRadius: BorderRadius.circular(23),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x1F000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.navigation_rounded,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1536,6 +1860,42 @@ class _UserLocationDot extends StatelessWidget {
   }
 }
 
+// ── Heading arrow shown while navigating ──
+class _NavArrow extends StatelessWidget {
+  final double heading; // degrees clockwise from north
+
+  const _NavArrow({required this.heading});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Transform.rotate(
+        angle: heading * math.pi / 180,
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.primary.withValues(alpha: 0.35),
+                blurRadius: 8,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+          child: const Icon(
+            Icons.navigation_rounded,
+            color: AppColors.primary,
+            size: 24,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // A single turn-by-turn navigation step.
 class _NavStep {
   final String instruction;
@@ -1549,4 +1909,28 @@ class _NavStep {
     required this.location,
     required this.distance,
   });
+}
+
+// What OSRM returned for one route.
+class _RouteResult {
+  final List<LatLng> points;
+  final double distance; // metres
+  final double duration; // seconds (driving)
+  final List<_NavStep> steps;
+
+  _RouteResult({
+    required this.points,
+    required this.distance,
+    required this.duration,
+    required this.steps,
+  });
+}
+
+// Where the user is relative to the route.
+class _RouteMatch {
+  final double offRouteM; // distance from the route line
+  final int segIndex; // route segment the user is closest to
+  final double alongM; // metres travelled along the route
+
+  _RouteMatch(this.offRouteM, this.segIndex, this.alongM);
 }
