@@ -2,12 +2,13 @@ class ApiConfig {
   // local IP on the wifi network. Phone must be on the SAME wifi.
   // Run `ipconfig` on your PC to find this; update when your network changes.
 
-  // static const String baseUrl = "http://localhost:8080"; // localhost using USB and adb tcp:8080 tcp:8080
+  // static const String baseUrl =
+  //     "http://localhost:8080"; // localhost using USB and adb tcp:8080 tcp:8080
   // Switch to this base url if you switching to mobile
 
-  // Resto config
+  // // Resto config
   static const String baseUrl =
-      "https://comic-precipitation-endangered-speeches.trycloudflare.com"; // for wifi connectivity (Note: it should be the same wifi connectivity)
+      "https://felt-uncle-portsmouth-smoke.trycloudflare.com"; // for wifi connectivity (Note: it should be the same wifi connectivity)
 
   // static const String baseUrl = "http://192.168.68.103:8080";
 

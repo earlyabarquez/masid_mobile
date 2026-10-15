@@ -59,6 +59,17 @@ class AlertService {
     return (res.data as List).length;
   }
 
+  // Fetch the unread alerts themselves (used to pop notifications for new ones)
+  Future<List<AppAlert>> getUnreadAlerts() async {
+    final userID = await _currentUserID();
+    if (userID == null) return [];
+    final res = await _dio.get(
+      '/api/alerts/unread',
+      queryParameters: {'userID': userID},
+    );
+    return (res.data as List).map((j) => AppAlert.fromJson(j)).toList();
+  }
+
   // Fetch all alerts for the logged-in user
   Future<List<AppAlert>> getMyAlerts() async {
     final userID = await _currentUserID();

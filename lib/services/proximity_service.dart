@@ -1,15 +1,20 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'report_service.dart';
 import 'alert_service.dart';
+import 'alert_watcher.dart';
+import 'location_sync_service.dart';
 
 /// Watches the user's location and alerts them when a verified hazard is
 /// within [proximityRadiusMeters]. Foreground-only (runs while the app is open).
 ///
-/// - Fires a local notification (popup)
+/// - Fires a local notification (popup with sound + vibration)
 /// - Creates a backend alert (so it shows in the Alerts tab)
 /// - Alerts once per hazard (won't re-notify while you stay nearby)
+/// - Reports the user's location to the backend so it can alert them when a
+///   report is verified near them, and shows those alerts too (AlertWatcher)
 class ProximityService {
   ProximityService._();
   static final ProximityService instance = ProximityService._();
@@ -17,25 +22,53 @@ class ProximityService {
   static const double proximityRadiusMeters = 100.0;
   static const int _distanceFilterMeters = 15; // update when user moves ~15m
 
+  // Android channel settings can't be changed once a channel exists, so the
+  // id is versioned: bump it if you change sound/vibration/importance again.
+  static const String _channelId = 'hazard_nearby_v2';
+  static const String _channelName = 'Nearby Hazard Alerts';
+  static const String _channelDesc =
+      'Warns you when a verified hazard is nearby';
+
+  // wait, buzz, pause, buzz, pause, long buzz (ms)
+  static final Int64List _vibrationPattern = Int64List.fromList([
+    0,
+    500,
+    250,
+    500,
+    250,
+    800,
+  ]);
+
   final _alertService = AlertService();
   final _notifications = FlutterLocalNotificationsPlugin();
 
   StreamSubscription<Position>? _positionSub;
   bool _started = false;
   bool _notifInitialized = false;
+  Position? _lastPosition;
 
-  // Hazard IDs the user is CURRENTLY within range of.
-  // We alert only when a hazard ENTERS this set (outside -> inside),
+  // Hazard IDs the user is CURRENTLY within range of (or was already warned
+  // about). We alert only when a hazard ENTERS this set (outside -> inside),
   // not repeatedly while the user stays nearby. This prevents alert spam.
   final Set<int> _hazardsInRange = {};
 
   // Latest known verified hazards (refreshed periodically by the map)
   List<Report> _hazards = [];
 
-  // Called by the map when it (re)loads verified hazards
+  // Called by the map when it (re)loads verified hazards. Checks right away
+  // against the last known position, so a hazard that was just verified near a
+  // user who is standing still alerts immediately (not after they next move).
   void updateHazards(List<Report> hazards) {
     _hazards = hazards;
+    final pos = _lastPosition;
+    if (pos != null) _checkHazards(pos);
   }
+
+  /// True if this hazard has already been warned about (or is in range).
+  bool hasAlerted(int hazardID) => _hazardsInRange.contains(hazardID);
+
+  /// Mark a hazard as already warned about (prevents a duplicate popup).
+  void markAlerted(int hazardID) => _hazardsInRange.add(hazardID);
 
   Future<void> _initNotifications() async {
     if (_notifInitialized) return;
@@ -47,12 +80,15 @@ class ProximityService {
     );
     await _notifications.initialize(initSettings);
 
-    // Android notification channel
-    const channel = AndroidNotificationChannel(
-      'hazard_proximity',
-      'Nearby Hazard Alerts',
-      description: 'Warns you when a verified hazard is nearby',
-      importance: Importance.high,
+    // Android notification channel: loud (max importance), with sound + vibration
+    final channel = AndroidNotificationChannel(
+      _channelId,
+      _channelName,
+      description: _channelDesc,
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      vibrationPattern: _vibrationPattern,
     );
     await _notifications
         .resolvePlatformSpecificImplementation<
@@ -61,6 +97,41 @@ class ProximityService {
         ?.createNotificationChannel(channel);
 
     _notifInitialized = true;
+  }
+
+  /// Show a notification with sound + vibration. (If the phone is on silent,
+  /// the OS plays the vibration only.)
+  Future<void> notify({
+    required int id,
+    required String title,
+    required String body,
+  }) async {
+    try {
+      await _initNotifications();
+      final androidDetails = AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        channelDescription: _channelDesc,
+        importance: Importance.max,
+        priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+        vibrationPattern: _vibrationPattern,
+        icon: '@mipmap/ic_launcher',
+      );
+      const iosDetails = DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      );
+      final details = NotificationDetails(
+        android: androidDetails,
+        iOS: iosDetails,
+      );
+      await _notifications.show(id, title, body, details);
+    } catch (_) {
+      // notification failure shouldn't block anything else
+    }
   }
 
   /// Start watching location + proximity. Safe to call multiple times.
@@ -80,12 +151,25 @@ class ProximityService {
       ),
     ).listen(_onPosition, onError: (_) {});
 
+    // Use the last known position right away (don't wait for the first move):
+    // lets nearby checks run immediately and tells the backend where we are.
+    final last = await Geolocator.getLastKnownPosition();
+    if (last != null) {
+      _lastPosition = last;
+      LocationSyncService.instance.maybeSend(last);
+    }
+
+    // Start picking up alerts the backend creates when a report is verified near us.
+    AlertWatcher.instance.start();
+
     _started = true;
   }
 
   Future<void> stop() async {
     await _positionSub?.cancel();
     _positionSub = null;
+    AlertWatcher.instance.stop();
+    LocationSyncService.instance.stop();
     _started = false;
   }
 
@@ -105,6 +189,12 @@ class ProximityService {
   }
 
   void _onPosition(Position pos) {
+    _lastPosition = pos;
+    LocationSyncService.instance.maybeSend(pos); // keep the backend up to date
+    _checkHazards(pos);
+  }
+
+  void _checkHazards(Position pos) {
     for (final h in _hazards) {
       final meters = Geolocator.distanceBetween(
         pos.latitude,
@@ -134,25 +224,8 @@ class ProximityService {
     final message =
         'A verified ${hazard.hazardName.toLowerCase()} is about $distanceText. Stay alert and stay safe.';
 
-    // 1. Local popup notification
-    try {
-      const androidDetails = AndroidNotificationDetails(
-        'hazard_proximity',
-        'Nearby Hazard Alerts',
-        channelDescription: 'Warns you when a verified hazard is nearby',
-        importance: Importance.high,
-        priority: Priority.high,
-        icon: '@mipmap/ic_launcher',
-      );
-      const iosDetails = DarwinNotificationDetails();
-      const details = NotificationDetails(
-        android: androidDetails,
-        iOS: iosDetails,
-      );
-      await _notifications.show(hazard.reportID, title, message, details);
-    } catch (_) {
-      // notification failure shouldn't block the backend alert
-    }
+    // 1. Local popup notification (sound + vibration)
+    await notify(id: hazard.reportID, title: title, body: message);
 
     // 2. Create a backend alert so it shows in the Alerts tab
     //    (backend deduplicates — won't create if an unread one already exists)
