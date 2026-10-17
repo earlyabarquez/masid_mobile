@@ -6,6 +6,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../config/app_colors.dart';
 import '../../services/cloudinary_service.dart';
 import '../../services/hazard_service.dart';
+import '../../services/offline_report_service.dart';
 import '../../services/report_service.dart';
 
 // Icon mapping for hazard names (fetched hazards use these icons by name)
@@ -52,13 +53,14 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
   final _hazardService = HazardService();
   final _reportService = ReportService();
 
-  List<HazardType> _hazards = [];
+  List<HazardOption> _hazards = [];
 
   int? _selectedHazardID;
   int _severity = 3;
 
   bool _loadingData = true; // fetching hazards + barangays
   bool _loading = false; // submitting
+  bool _offline = false; // no internet: the report will be saved and sent later
   String? _errorMessage;
 
   // Real GPS location
@@ -82,21 +84,39 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
     super.dispose();
   }
 
-  // Fetch hazard types + barangays from the backend
+  // Fetch hazard types from the backend. If that fails (offline), fall back to
+  // the copy saved on the phone so the form still works.
   Future<void> _loadData() async {
+    final offline = await OfflineReportService.instance.isOffline();
+    if (mounted) setState(() => _offline = offline);
+
     try {
       final hazards = await _hazardService.getHazardTypes();
+      final options = hazards
+          .map((h) => HazardOption(h.hazardID, h.hazardName))
+          .toList();
+      OfflineReportService.instance.saveHazardTypes(options); // keep a copy
       if (!mounted) return;
       setState(() {
-        _hazards = hazards;
+        _hazards = options;
         _loadingData = false;
       });
     } catch (e) {
+      final cached = await OfflineReportService.instance.loadHazardTypes();
       if (!mounted) return;
-      setState(() {
-        _loadingData = false;
-        _errorMessage = 'Failed to load form data. Check your connection.';
-      });
+      if (cached.isNotEmpty) {
+        setState(() {
+          _hazards = cached;
+          _loadingData = false;
+          _offline = true; // the report will be queued if sending fails
+        });
+      } else {
+        setState(() {
+          _loadingData = false;
+          _errorMessage =
+              'Failed to load form data. Connect to the internet once so it can be saved for offline use.';
+        });
+      }
     }
   }
 
@@ -172,9 +192,19 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       _errorMessage = null;
     });
 
+    // Set once the photo is uploaded, so saving offline afterwards won't upload it twice.
+    String? uploadedUrl;
+
     try {
+      // No connection at all? Save the report on the phone and send it later.
+      if (await OfflineReportService.instance.isOffline()) {
+        await _saveOffline();
+        return;
+      }
+
       // 1. Upload photo to Cloudinary
       final imageUrl = await CloudinaryService.uploadImage(widget.photo);
+      uploadedUrl = imageUrl?.toString();
 
       // 2. Submit the report to the backend (real GPS coords)
       await _reportService.submitReport(
@@ -217,9 +247,59 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
       widget.onSubmitted();
     } catch (e) {
       if (!mounted) return;
+      // The connection dropped part-way through: keep the report and send it later.
+      if (isNetworkError(e)) {
+        await _saveOffline(uploadedUrl: uploadedUrl);
+        return;
+      }
       setState(() {
         _loading = false;
         _errorMessage = 'Failed to submit: ${e.toString()}';
+      });
+    }
+  }
+
+  // Save the report on the phone; it is sent automatically when the connection returns.
+  Future<void> _saveOffline({String? uploadedUrl}) async {
+    try {
+      await OfflineReportService.instance.enqueue(
+        photo: widget.photo,
+        hazardID: _selectedHazardID!,
+        severity: _severity,
+        description: _descCtrl.text.trim(),
+        latitude: _lat!,
+        longitude: _lng!,
+        imageUrl: uploadedUrl,
+      );
+      if (!mounted) return;
+      setState(() => _loading = false);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              Icon(Icons.cloud_off_rounded, color: Colors.white, size: 18),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Saved on your phone. It will be sent when you’re back online.',
+                  style: TextStyle(fontFamily: 'Sora'),
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: Color(0xFFD97706),
+          duration: Duration(seconds: 3),
+        ),
+      );
+
+      widget.onSubmitted();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _errorMessage =
+            'Could not save the report on your phone: ${e.toString()}';
       });
     }
   }
@@ -278,6 +358,40 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                       const SizedBox(height: 8),
                       _buildLocationCard(),
                       const SizedBox(height: 24),
+                      if (_offline) ...[
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.primaryLight,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: AppColors.primary.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: const Row(
+                            children: [
+                              Icon(
+                                Icons.cloud_off_rounded,
+                                size: 18,
+                                color: AppColors.primary,
+                              ),
+                              SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'You’re offline. This report will be saved on your phone and sent automatically when you’re back online.',
+                                  style: TextStyle(
+                                    fontFamily: 'Sora',
+                                    fontSize: 12,
+                                    color: AppColors.primary,
+                                    height: 1.5,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
                       if (_errorMessage != null) ...[
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -334,16 +448,22 @@ class _ReportFormSheetState extends State<ReportFormSheet> {
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     Icon(
-                                      _isCritical
-                                          ? Icons.warning_rounded
-                                          : Icons.send_rounded,
+                                      _offline
+                                          ? Icons.save_alt_rounded
+                                          : (_isCritical
+                                                ? Icons.warning_rounded
+                                                : Icons.send_rounded),
                                       size: 18,
                                     ),
                                     const SizedBox(width: 8),
                                     Text(
-                                      _isCritical
-                                          ? 'Submit Critical Report'
-                                          : 'Submit Report',
+                                      _offline
+                                          ? (_isCritical
+                                                ? 'Save Critical Report (offline)'
+                                                : 'Save Report (offline)')
+                                          : (_isCritical
+                                                ? 'Submit Critical Report'
+                                                : 'Submit Report'),
                                     ),
                                   ],
                                 ),

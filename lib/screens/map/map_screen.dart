@@ -6,11 +6,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:flutter_compass/flutter_compass.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_constants.dart';
 import '../../services/report_service.dart';
 import '../../services/proximity_service.dart';
 import '../../services/establishment_service.dart';
+import '../../services/offline_report_service.dart';
 import '../../widgets/pulsing_marker.dart';
 import 'hazard_detail_sheet.dart';
 
@@ -153,8 +156,8 @@ class _MapScreenState extends State<MapScreen> {
   // "finding route" spinner from hanging forever on a bad connection.
   final Dio _dio = Dio(
     BaseOptions(
-      connectTimeout: const Duration(seconds: 8),
-      receiveTimeout: const Duration(seconds: 10),
+      connectTimeout: const Duration(seconds: 6),
+      receiveTimeout: const Duration(seconds: 8),
     ),
   );
 
@@ -169,12 +172,32 @@ class _MapScreenState extends State<MapScreen> {
   double _heading = 0; // degrees clockwise from north
   bool _followUser = false; // camera follows the user while navigating
 
+  // Compass (phone orientation) drives the arrow when walking or standing still;
+  // GPS course takes over once you're moving fast (driving), where it's more reliable.
+  static const double _gpsHeadingMinSpeed = 3.0; // m/s (~11 km/h)
+  StreamSubscription<CompassEvent>? _compassSub;
+  double _gpsSpeed = 0; // m/s from the latest GPS fix
+  DateTime _lastCompassUi = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // ── Offline support ──
+  final Connectivity _connectivity = Connectivity();
+  StreamSubscription<List<ConnectivityResult>>? _connSub;
+  bool _offline = false; // no network: saved data is used instead
+  int _pendingReports = 0; // reports saved on the phone, waiting to be sent
+  bool _straightLine = false; // current route has no road data (straight line)
+  double _destBearing = 0; // compass bearing from the user to the destination
+
   @override
   void initState() {
     super.initState();
     _loadReports();
     _loadEstablishments();
     _initLocation();
+    _watchConnectivity();
+    // Send any reports that were saved while offline, now and whenever we reconnect.
+    _pendingReports = OfflineReportService.instance.pendingCount.value;
+    OfflineReportService.instance.pendingCount.addListener(_onPendingChanged);
+    OfflineReportService.instance.start();
     // Auto-refresh every 30 seconds so newly verified reports appear
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _loadReports(silent: true);
@@ -297,8 +320,12 @@ class _MapScreenState extends State<MapScreen> {
     if (!mounted) return;
     final here = LatLng(pos.latitude, pos.longitude);
 
-    // GPS heading is noisy when standing still — only trust it while moving.
-    if (pos.speed > 1.0 && pos.heading >= 0) _heading = pos.heading;
+    // Moving fast (driving/cycling): GPS course is the most reliable heading.
+    // Slower than that, the compass (phone orientation) is used instead.
+    _gpsSpeed = pos.speed;
+    if (pos.speed > _gpsHeadingMinSpeed && pos.heading >= 0) {
+      _heading = pos.heading;
+    }
 
     setState(() {
       _userLocation = here;
@@ -312,6 +339,68 @@ class _MapScreenState extends State<MapScreen> {
         _mapController.moveAndRotate(here, 17, -_heading);
       }
     }
+  }
+
+  // ── Offline support ──
+  void _watchConnectivity() {
+    _connectivity.checkConnectivity().then(_onConnectivity);
+    _connSub = _connectivity.onConnectivityChanged.listen(_onConnectivity);
+  }
+
+  void _onConnectivity(List<ConnectivityResult> results) {
+    if (!mounted) return;
+    final offlineNow =
+        results.isEmpty || results.every((r) => r == ConnectivityResult.none);
+    final cameOnline = _offline && !offlineNow;
+    setState(() => _offline = offlineNow);
+    if (cameOnline) {
+      // Back online: refresh data (this also refreshes the saved establishments).
+      _loadReports(silent: true);
+      _loadEstablishments();
+    }
+  }
+
+  void _onPendingChanged() {
+    if (!mounted) return;
+    final n = OfflineReportService.instance.pendingCount.value;
+    final sentSome = n < _pendingReports;
+    setState(() => _pendingReports = n);
+    if (sentSome && n == 0) _snack('Your saved report(s) were sent.');
+  }
+
+  // ── Compass: makes the arrow follow the way the phone is facing ──
+  void _startCompass() {
+    if (_compassSub != null) return;
+    final stream = FlutterCompass.events; // null if the phone has no compass
+    if (stream == null) return;
+    _compassSub = stream.listen(_onCompass, onError: (_) {});
+  }
+
+  void _stopCompass() {
+    _compassSub?.cancel();
+    _compassSub = null;
+  }
+
+  void _onCompass(CompassEvent e) {
+    final raw = e.heading;
+    if (raw == null || !mounted || !_navigating) return;
+    if (_gpsSpeed > _gpsHeadingMinSpeed) return; // GPS course takes over
+
+    final target = (raw + 360) % 360;
+    // Shortest signed angle from the current heading to the target (-180..180).
+    final diff = ((target - _heading + 540) % 360) - 180;
+    if (diff.abs() < 3) return; // dead zone: ignore sensor jitter
+
+    // Limit UI updates (the sensor fires many times a second).
+    final now = DateTime.now();
+    if (now.difference(_lastCompassUi) < const Duration(milliseconds: 80)) {
+      return;
+    }
+    _lastCompassUi = now;
+
+    // Smooth: move 40% of the way toward the target each update.
+    setState(() => _heading = (_heading + diff * 0.4 + 360) % 360);
+    if (_followUser) _mapController.rotate(-_heading); // heading-up map
   }
 
   void _snack(String msg) {
@@ -329,6 +418,11 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _refreshTimer?.cancel();
     _trackSub?.cancel();
+    _compassSub?.cancel();
+    _connSub?.cancel();
+    OfflineReportService.instance.pendingCount.removeListener(
+      _onPendingChanged,
+    );
     super.dispose();
   }
 
@@ -525,6 +619,7 @@ class _MapScreenState extends State<MapScreen> {
   Future<Establishment?> _nearestByRoad(List<Establishment> candidates) async {
     if (candidates.isEmpty) return null;
     if (candidates.length == 1) return candidates.first;
+    if (_offline) return null; // no internet: use the straight-line nearest
     try {
       final coords = [
         '${_userLocation.longitude},${_userLocation.latitude}',
@@ -560,16 +655,20 @@ class _MapScreenState extends State<MapScreen> {
     final end = LatLng(dest.latitude, dest.longitude);
 
     _RouteResult? r;
-    try {
-      r = await _fetchRoute(start, end);
-    } catch (_) {
-      r = null;
+    if (!_offline) {
+      try {
+        r = await _fetchRoute(start, end);
+      } catch (_) {
+        r = null;
+      }
     }
     if (!mounted) return;
 
     final pts = (r != null && r.points.length >= 2) ? r.points : [start, end];
     final cum = _buildCumulative(pts);
     final steps = r?.steps ?? <_NavStep>[];
+    // No road route (offline / routing failed): guide by straight line + bearing.
+    final straight = r == null || r.points.length < 2;
 
     setState(() {
       _routeDest = dest;
@@ -578,6 +677,7 @@ class _MapScreenState extends State<MapScreen> {
       _cumDist = cum;
       _routeDistanceM = cum.last;
       _routeDurationS = r?.duration ?? 0;
+      _straightLine = straight;
       _navSteps = steps;
       _stepAlong = steps
           .map(
@@ -603,6 +703,7 @@ class _MapScreenState extends State<MapScreen> {
 
     // Switch to high-rate GPS for navigation.
     _startTracking(precise: true);
+    _startCompass();
     _updateNavProgress(_userLocation);
     _mapController.moveAndRotate(_userLocation, 17, -_heading);
   }
@@ -613,6 +714,7 @@ class _MapScreenState extends State<MapScreen> {
       _followUser = false;
       _rerouting = false;
     });
+    _stopCompass();
     // Back to battery-friendly tracking (only if tracking was running).
     if (_trackSub != null) _startTracking();
     _mapController.rotate(0);
@@ -682,9 +784,14 @@ class _MapScreenState extends State<MapScreen> {
 
     final destPoint = LatLng(_routeDest!.latitude, _routeDest!.longitude);
     final straightToDest = distance.as(LengthUnit.Meter, here, destPoint);
+    _destBearing = (distance.bearing(here, destPoint) + 360) % 360;
     final match = _matchToRoute(here);
 
-    if (match != null) {
+    if (_straightLine) {
+      // No road data (offline): guide by straight-line distance + bearing.
+      _distRemaining = straightToDest;
+      _etaSeconds = 0;
+    } else if (match != null) {
       _routeSeg = match.segIndex;
       final total = _cumDist.last;
       _distRemaining = math.max(0.0, total - match.alongM);
@@ -702,16 +809,27 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    // Off-route detection (needs a few consecutive readings to ignore GPS jitter)
-    if (match != null && match.offRouteM > 40) {
-      _offRouteCount++;
+    if (_straightLine) {
+      // Offline fallback route: once we're online again, try to upgrade it to a road route.
+      if (!_offline &&
+          !_rerouting &&
+          DateTime.now().difference(_lastReroute) >
+              const Duration(seconds: 20)) {
+        _reroute(here);
+      }
     } else {
-      _offRouteCount = 0;
-    }
-    if (_offRouteCount >= 3 &&
-        !_rerouting &&
-        DateTime.now().difference(_lastReroute) > const Duration(seconds: 10)) {
-      _reroute(here);
+      // Off-route detection (needs a few consecutive readings to ignore GPS jitter)
+      if (match != null && match.offRouteM > 40) {
+        _offRouteCount++;
+      } else {
+        _offRouteCount = 0;
+      }
+      if (_offRouteCount >= 3 &&
+          !_rerouting &&
+          DateTime.now().difference(_lastReroute) >
+              const Duration(seconds: 10)) {
+        _reroute(here);
+      }
     }
 
     // Advance to the next maneuver once we're within ~10 m of the current one.
@@ -880,6 +998,12 @@ class _MapScreenState extends State<MapScreen> {
   String _fmtDist(double m) =>
       m >= 1000 ? '${(m / 1000).toStringAsFixed(1)} km' : '${m.round()} m';
 
+  // 0° -> "N", 90° -> "E", ... for the straight-line (offline) guidance text.
+  String _compassLabel(double bearing) {
+    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return dirs[(((bearing + 22.5) % 360) ~/ 45)];
+  }
+
   String _fmtEta(double seconds) {
     final mins = (seconds / 60).ceil();
     if (mins < 1) return '< 1 min';
@@ -938,7 +1062,7 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                       Text(
-                        '${isEvac ? (dest.evacType ?? "Evacuation") + " Evacuation Center" : "Medical Center"} · ${(_routeDistanceM / 1000).toStringAsFixed(2)} km',
+                        '${isEvac ? (dest.evacType ?? "Evacuation") + " Evacuation Center" : "Medical Center"} · ${(_routeDistanceM / 1000).toStringAsFixed(2)} km${_straightLine ? " (straight line)" : ""}',
                         style: const TextStyle(
                           fontFamily: 'Sora',
                           fontSize: 12,
@@ -1377,13 +1501,22 @@ class _MapScreenState extends State<MapScreen> {
                 ),
                 child: Row(
                   children: [
-                    Icon(
-                      hasSteps
-                          ? _navSteps[_currentStep].icon
-                          : Icons.navigation_rounded,
-                      color: Colors.white,
-                      size: 36,
-                    ),
+                    hasSteps
+                        ? Icon(
+                            _navSteps[_currentStep].icon,
+                            color: Colors.white,
+                            size: 36,
+                          )
+                        // Straight-line mode: the arrow points toward the destination,
+                        // relative to the way the phone is facing.
+                        : Transform.rotate(
+                            angle: (_destBearing - _heading) * math.pi / 180,
+                            child: const Icon(
+                              Icons.navigation_rounded,
+                              color: Colors.white,
+                              size: 36,
+                            ),
+                          ),
                     const SizedBox(width: 14),
                     Expanded(
                       child: Column(
@@ -1405,7 +1538,7 @@ class _MapScreenState extends State<MapScreen> {
                           Text(
                             hasSteps
                                 ? 'In ${_fmtDist(_distToNextTurn)}'
-                                : '${_fmtDist(_distRemaining)} to destination',
+                                : '${_fmtDist(_distRemaining)} · ${_compassLabel(_destBearing)}${_offline ? " · offline" : ""}',
                             style: const TextStyle(
                               fontFamily: 'Sora',
                               fontSize: 13,
@@ -1559,6 +1692,58 @@ class _MapScreenState extends State<MapScreen> {
             ),
           ),
 
+          // ── Offline / pending-reports chip ──
+          if ((_offline || _pendingReports > 0) && !_navigating && !_loading)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 68,
+              left: 16,
+              right: 16,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(100),
+                    border: Border.all(color: AppColors.border),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x22000000),
+                        blurRadius: 8,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _offline
+                            ? Icons.cloud_off_rounded
+                            : Icons.cloud_upload_rounded,
+                        size: 16,
+                        color: AppColors.secondary,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _offline
+                            ? 'Offline · using saved data${_pendingReports > 0 ? " · $_pendingReports report(s) waiting" : ""}'
+                            : 'Sending $_pendingReports saved report(s)…',
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.heading,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
           // ── Loading / error banner ──
           if (_loading)
             Positioned(
@@ -1591,7 +1776,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-          if (_error != null && !_loading)
+          if (_error != null && !_loading && !_offline)
             Positioned(
               top: MediaQuery.of(context).padding.top + 68,
               left: 16,

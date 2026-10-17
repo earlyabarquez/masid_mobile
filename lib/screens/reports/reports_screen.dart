@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../config/app_colors.dart';
 import '../../services/report_service.dart';
+import '../../services/offline_report_service.dart';
 import '../map/map_screen.dart'; // reuse severityColor + hazardIconFor helpers
 import 'report_detail_screen.dart';
 
@@ -72,8 +73,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
   String? _error;
   Timer? _refreshTimer;
 
-  // Offline queue count — 0 until offline mode (SQLite) is built later.
-  final int _pendingSyncCount = 0;
+  // Reports saved on the phone while offline, waiting to be sent.
+  List<PendingReport> _pending = [];
+  bool _fromCache = false; // showing the saved copy (no connection)
+  bool _syncing = false;
+  int get _pendingSyncCount => _pending.length;
 
   final _filters = ['All', 'Pending', 'Verified', 'Rejected', 'Critical'];
 
@@ -81,6 +85,10 @@ class _ReportsScreenState extends State<ReportsScreen> {
   void initState() {
     super.initState();
     _loadReports();
+    _loadPending();
+    // Reload the "waiting to send" list whenever the offline queue changes.
+    OfflineReportService.instance.pendingCount.addListener(_onQueueChanged);
+    OfflineReportService.instance.failedCount.addListener(_onQueueChanged);
     // Auto-refresh every 30s so status changes (verify/reject) show up
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _loadReports(silent: true);
@@ -90,6 +98,8 @@ class _ReportsScreenState extends State<ReportsScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    OfflineReportService.instance.pendingCount.removeListener(_onQueueChanged);
+    OfflineReportService.instance.failedCount.removeListener(_onQueueChanged);
     super.dispose();
   }
 
@@ -103,6 +113,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
       if (!mounted) return;
       setState(() {
         _reports = reports;
+        _fromCache = _reportService.lastLoadFromCache;
         _loading = false;
         _error = null;
       });
@@ -115,6 +126,78 @@ class _ReportsScreenState extends State<ReportsScreen> {
       });
     }
   }
+
+  void _onQueueChanged() {
+    _loadPending();
+    // A report that just finished sending now exists on the server — refresh the list.
+    _loadReports(silent: true);
+  }
+
+  Future<void> _loadPending() async {
+    final list = await OfflineReportService.instance.loadPending();
+    if (!mounted) return;
+    setState(() => _pending = list);
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg, style: const TextStyle(fontFamily: 'Sora')),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  // "Sync Now" / retry: send everything saved on the phone right away.
+  Future<void> _syncNow() async {
+    setState(() => _syncing = true);
+    final offline = await OfflineReportService.instance.isOffline();
+    var sent = 0;
+    if (!offline) {
+      sent = await OfflineReportService.instance.syncPending(retryFailed: true);
+    }
+    if (!mounted) return;
+    setState(() => _syncing = false);
+    await _loadPending();
+    if (sent > 0) _loadReports(silent: true);
+    _toast(
+      offline
+          ? 'No connection. Saved reports will be sent automatically when you’re back online.'
+          : sent > 0
+          ? '$sent report${sent > 1 ? 's' : ''} sent.'
+          : 'Could not send right now. We’ll keep trying.',
+    );
+  }
+
+  Future<void> _confirmDiscard(PendingReport p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete saved report?'),
+        content: const Text(
+          'This report was never sent. Deleting it removes it from your phone for good.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await OfflineReportService.instance.discard(p.id);
+      await _loadPending();
+    }
+  }
+
+  // Saved-on-phone reports show under "All" and "Pending".
+  List<PendingReport> get _visiblePending =>
+      (_activeFilter == 'All' || _activeFilter == 'Pending') ? _pending : [];
 
   List<Report> get _filteredReports {
     if (_activeFilter == 'All') return _reports;
@@ -135,6 +218,9 @@ class _ReportsScreenState extends State<ReportsScreen> {
             // ── Sync banner (only when there are unsynced reports) ──
             if (_pendingSyncCount > 0) _buildSyncBanner(),
 
+            // ── Offline notice (showing the saved copy of your reports) ──
+            if (_fromCache) _buildOfflineNotice(),
+
             // ── Filter chips ──
             _buildFilterChips(),
 
@@ -152,7 +238,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_error != null) {
+    if (_error != null && _pending.isEmpty) {
       return RefreshIndicator(
         onRefresh: () => _loadReports(),
         color: AppColors.primary,
@@ -187,7 +273,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
         ),
       );
     }
-    if (_filteredReports.isEmpty) {
+    if (_filteredReports.isEmpty && _visiblePending.isEmpty) {
       return RefreshIndicator(
         onRefresh: () => _loadReports(),
         color: AppColors.primary,
@@ -204,9 +290,13 @@ class _ReportsScreenState extends State<ReportsScreen> {
       color: AppColors.primary,
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        itemCount: _filteredReports.length,
+        itemCount: _visiblePending.length + _filteredReports.length,
         separatorBuilder: (_, __) => const SizedBox(height: 10),
-        itemBuilder: (_, i) => _buildReportCard(_filteredReports[i]),
+        itemBuilder: (_, i) {
+          final pending = _visiblePending;
+          if (i < pending.length) return _buildPendingCard(pending[i]);
+          return _buildReportCard(_filteredReports[i - pending.length]);
+        },
       ),
     );
   }
@@ -251,7 +341,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
               border: Border.all(color: AppColors.primaryBorder),
             ),
             child: Text(
-              '${_reports.length}',
+              '${_reports.length + _pending.length}',
               style: const TextStyle(
                 fontFamily: 'Sora',
                 fontSize: 14,
@@ -295,27 +385,16 @@ class _ReportsScreenState extends State<ReportsScreen> {
             ),
           ),
           GestureDetector(
-            onTap: () {
-              // TODO: Trigger manual sync once offline mode (SQLite) is built
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Syncing reports...',
-                    style: TextStyle(fontFamily: 'Sora'),
-                  ),
-                  duration: Duration(seconds: 1),
-                ),
-              );
-            },
+            onTap: _syncing ? null : _syncNow,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
               decoration: BoxDecoration(
                 color: AppColors.warning,
                 borderRadius: BorderRadius.circular(100),
               ),
-              child: const Text(
-                'Sync Now',
-                style: TextStyle(
+              child: Text(
+                _syncing ? 'Sending…' : 'Sync Now',
+                style: const TextStyle(
                   fontFamily: 'Sora',
                   fontSize: 11,
                   fontWeight: FontWeight.w700,
@@ -324,6 +403,175 @@ class _ReportsScreenState extends State<ReportsScreen> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ── Offline notice ──
+  Widget _buildOfflineNotice() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.primaryLight,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.primary.withValues(alpha: 0.2)),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.cloud_off_rounded, size: 18, color: AppColors.primary),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'You’re offline. Showing your saved reports.',
+              style: TextStyle(
+                fontFamily: 'Sora',
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                color: AppColors.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Card for a report saved on the phone (not on the server yet) ──
+  Widget _buildPendingCard(PendingReport p) {
+    final color = p.failed ? AppColors.error : AppColors.warning;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              p.failed ? Icons.cloud_off_rounded : Icons.cloud_upload_outlined,
+              color: color,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        p.hazardName,
+                        style: const TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.heading,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(100),
+                      ),
+                      child: Text(
+                        p.failed ? 'Not sent' : 'Waiting to send',
+                        style: TextStyle(
+                          fontFamily: 'Sora',
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          color: color,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  p.description.isEmpty ? 'No description' : p.description,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: 'Sora',
+                    fontSize: 12,
+                    color: AppColors.muted,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.calendar_today_rounded,
+                      size: 12,
+                      color: AppColors.label,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      formatReportDate(p.createdAt),
+                      style: const TextStyle(
+                        fontFamily: 'Sora',
+                        fontSize: 11,
+                        color: AppColors.label,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    ...List.generate(5, (i) {
+                      return Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(right: 3),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: i < p.severity
+                              ? severityColor(p.severity, 'Pending')
+                              : AppColors.border,
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (p.failed) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              onPressed: _syncing ? null : _syncNow,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Try again',
+              icon: const Icon(
+                Icons.refresh_rounded,
+                size: 20,
+                color: AppColors.primary,
+              ),
+            ),
+            IconButton(
+              onPressed: () => _confirmDiscard(p),
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Delete',
+              icon: const Icon(
+                Icons.delete_outline_rounded,
+                size: 20,
+                color: AppColors.error,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -341,9 +589,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
         itemBuilder: (_, i) {
           final filter = _filters[i];
           final isActive = _activeFilter == filter;
-          final count = filter == 'All'
-              ? _reports.length
-              : _reports.where((r) => r.statusName == filter).length;
+          final count =
+              (filter == 'All'
+                  ? _reports.length
+                  : _reports.where((r) => r.statusName == filter).length) +
+              ((filter == 'All' || filter == 'Pending') ? _pending.length : 0);
 
           return GestureDetector(
             onTap: () => setState(() => _activeFilter = filter),
